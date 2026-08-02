@@ -59,6 +59,26 @@ def test_device_flow_happy_path(tmp_path):
     assert stored[CLIENT_A]["expires_at"] == 1_000.0 + 86400
 
 
+def test_run_device_flow_reuses_code_started_by_caller(tmp_path):
+    """The Authorize button calls start_device_flow (to display the user code)
+    then hands off to run_device_flow on a worker thread. run_device_flow must
+    poll THAT code, not start a second flow — otherwise the user approves the
+    displayed code while the plugin polls an orphaned one (jarvis 2026-08-02:
+    two user codes logged ~200ms apart, auth never completed)."""
+    api = FakeAPI()
+    api.queue_post(DEVICE_AUTH).queue_post(token_response())
+    auth = make_auth(api, tmp_path)
+
+    info = auth.start_device_flow()
+    status, _ = auth.run_device_flow()
+    assert status == "success"
+    device_auth_posts = [c for c in api.post_calls if c["path"].endswith("device_authorization")]
+    assert len(device_auth_posts) == 1          # no second flow started
+    token_posts = [c for c in api.post_calls if c["path"].endswith("token")]
+    assert token_posts[0]["form"]["device_code"] == "DEV-CODE-XYZ"
+    assert info["user_code"] == "ABCD-1234"
+
+
 def test_device_flow_pending_then_success(tmp_path):
     api = FakeAPI()
     (api.queue_post(DEVICE_AUTH)
