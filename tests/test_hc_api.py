@@ -206,3 +206,32 @@ def test_put_retried_by_default_on_5xx():
     api = make_api(transport)
     api.put_json("/api/homeappliances/x/settings/y", {"data": {}})   # idempotent -> retried
     assert len(transport.requests) == 2
+
+
+def test_no_retry_start_refreshes_and_resends_on_401():
+    # A 401 is provably-not-executed, so refresh+resend is safe even for a
+    # no_retry program start — the double-start guard must NOT block it.
+    transport = ScriptedTransport()
+    transport.queue(401, {"content-type": "application/json"},
+                    json.dumps({"error": "invalid_token"}))
+    transport.queue(204, HC_JSON, b"")
+    api = make_api(transport)
+    refreshes = {"n": 0}
+
+    def handler(_used_token):
+        refreshes["n"] += 1
+        return True                         # "token refreshed" -> retry the start once
+
+    api.set_unauthorized_handler(handler)
+    api.put_json("/api/homeappliances/x/programs/active", {"data": {}}, no_retry=True)
+    assert refreshes["n"] == 1
+    assert len(transport.requests) == 2     # one 401, one resend — success
+
+
+def test_no_retry_start_401_without_handler_raises_once():
+    transport = ScriptedTransport()
+    transport.queue(401, {"content-type": "application/json"}, json.dumps({"error": "x"}))
+    api = make_api(transport)
+    with pytest.raises(HomeConnectError):
+        api.put_json("/api/homeappliances/x/programs/active", {"data": {}}, no_retry=True)
+    assert len(transport.requests) == 1     # no handler -> no resend

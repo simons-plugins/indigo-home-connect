@@ -122,7 +122,10 @@ class StreamResponse:
                 buf = parts.pop()              # keep any trailing partial line
                 for line in parts:
                     yield line.rstrip("\r")
-        except (OSError, http.client.HTTPException) as exc:
+        except (OSError, http.client.HTTPException, AttributeError, ValueError) as exc:
+            # AttributeError/ValueError show up when the socket is closed from
+            # another thread mid-chunked-read (shutdown); surface them as a clean
+            # HomeConnectError so the reconnect loop logs one line, not a traceback.
             raise HomeConnectError(
                 f"event stream read failed on {redact_path(self._path)}: {exc}") from exc
         finally:
@@ -202,7 +205,10 @@ class HomeConnectAPI:
     def put_json(self, path, payload, authorize=True, no_retry=False):
         """PUT a JSON body. ``no_retry`` disables the idempotent retry loop for
         calls that must never be re-sent on a timeout — the program-start PUT,
-        where a retried request could double-start an appliance (PRD §3.3)."""
+        where a retried request could double-start an appliance (PRD §3.3). A 401
+        is still refreshed-and-resent once even under ``no_retry``: a 401 is
+        provably-not-executed, so resending after a token refresh cannot
+        double-start."""
         body = json.dumps(payload)
         raw = self.request("PUT", path, headers={"Content-Type": HC_CONTENT_TYPE},
                            body=body, accept=HC_CONTENT_TYPE, authorize=authorize, no_retry=no_retry)
@@ -242,7 +248,10 @@ class HomeConnectAPI:
                 self._apply_retry_after(raw)
             err = self._build_error(raw, method, path)
 
-            if raw.status == 401 and not unauthorized_retried and retryable:
+            # A 401 is provably-not-executed (the server rejected the request
+            # before acting), so one refresh-and-resend is safe even for a
+            # no_retry program start — this branch is independent of ``retryable``.
+            if raw.status == 401 and not unauthorized_retried:
                 handler = on_unauthorized or self._on_unauthorized
                 if handler and handler(self._last_used_token):
                     unauthorized_retried = True
