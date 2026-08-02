@@ -122,6 +122,24 @@ class HomeConnectAppliance:
         with self._lock:
             self._observers.setdefault(key, []).append(callback)
 
+    def unsubscribe(self, key, callback):
+        """Remove a previously-registered ``callback`` for ``key`` (idempotent).
+
+        Used by the Phase 3 device bridge on ``deviceStopComm`` so a stopped
+        device stops receiving state writes; a callback that was never
+        registered is silently ignored.
+        """
+        with self._lock:
+            callbacks = self._observers.get(key)
+            if not callbacks:
+                return
+            try:
+                callbacks.remove(callback)
+            except ValueError:
+                return
+            if not callbacks:
+                del self._observers[key]
+
     def _notify(self, key, value):
         with self._lock:
             callbacks = list(self._observers.get(key, ())) + list(self._observers.get(None, ()))
