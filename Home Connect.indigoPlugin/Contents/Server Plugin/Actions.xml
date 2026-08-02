@@ -2,9 +2,10 @@
 <!-- Phase 4 control actions. Every action is device-scoped via deviceFilter="self"
      (all seven Home Connect device types) — a single filter value, because a
      comma list silently yields an empty picker. The selected device arrives in
-     the callback as `dev` and, inside the ConfigUI dynamic menus, as
-     valuesDict["deviceId"]. All guard rails live in hc_control; the callbacks
-     here just resolve the appliance and dispatch. -->
+     the callback as `dev` and, inside the ConfigUI dynamic menus, as `targetId`
+     (the object being edited; valuesDict["deviceId"] is only a defensive
+     fallback). All guard rails live in hc_control; the callbacks here just
+     resolve the appliance and dispatch. -->
 <Actions>
 	<SupportURL>https://github.com/simons-plugins/indigo-home-connect</SupportURL>
 

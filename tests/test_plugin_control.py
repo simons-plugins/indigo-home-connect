@@ -38,14 +38,20 @@ class _FakeCoord:
 def _plugin(transport, tmp_path):
     p = plugin.Plugin("com.simons-plugins.homeconnect", "Home Connect", "2026.0.5", {})
     clock = Clock()
-    api = HomeConnectAPI(host="api.home-connect.com", logger=Mock(),
+    api_logger = Mock()
+    api = HomeConnectAPI(host="api.home-connect.com", logger=api_logger,
                          connection_factory=transport.factory,
                          monotonic=clock.monotonic, sleep=clock.sleep,
                          wall_now=lambda: datetime(2026, 8, 2, tzinfo=timezone.utc))
     cache = DiskCache(str(tmp_path / "cache.json"), "test", logger=Mock())
-    p._controller = Controller(api, cache, logger=Mock())
+    p._controller = Controller(api, cache, logger=Mock(), now=clock.monotonic)
     p.logger = Mock()
-    p._schedule_later = lambda fn, delay: None      # never fire a real 15s timer in tests
+    # Record StartWatch scheduling instead of firing a real 15s timer, so tests
+    # can assert whether a watch was armed.
+    p._schedule_later = Mock()
+    p._test_api = api
+    p._test_clock = clock
+    p._test_api_logger = api_logger
     return p
 
 
@@ -139,7 +145,43 @@ def test_action_when_appliance_absent_logs_error(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Dynamic menus from cache
+# Remote refusal / rate limit at the plugin seam
+# ---------------------------------------------------------------------------
+def test_remote_409_logs_once_no_watch_limiter_consumed(tmp_path):
+    transport = ScriptedTransport()
+    transport.queue(409, HC_JSON, json.dumps({"error": {"key": "BSH.Common.Error.Conflict"}}))
+    p = _plugin(transport, tmp_path)
+    p._coordinator = _FakeCoord([_appliance()])
+    p.startProgram(_Action({"program": "X.Program"}), _device())
+    # Exactly one actionable error, nothing raised into Indigo:
+    assert p.logger.error.call_count == 1
+    # The failed start did NOT arm a StartWatch (only success does):
+    assert p._schedule_later.call_count == 0
+    # ...but the limiter slot was consumed (the request reached BSH):
+    assert len(p._controller._start_limiter._events) == 1
+    assert [r["method"] for r in transport.requests] == ["PUT"]     # one attempt, not retried
+
+
+def test_429_retry_after_surfaces_once_second_start_waits_on_gate(tmp_path):
+    transport = ScriptedTransport()
+    transport.queue(429, {"content-type": "application/json", "retry-after": "30"}, "{}")
+    transport.queue(204, HC_JSON, b"")
+    p = _plugin(transport, tmp_path)
+    p._coordinator = _FakeCoord([_appliance()])
+    # First start hits the 429: surfaces once, no retry (no_retry start).
+    p.startProgram(_Action({"program": "X.Program"}), _device())
+    assert p.logger.error.call_count == 1
+    # Second start within the window waits on the shared gate (clock.sleep 30s)
+    # then succeeds — one gate warning, no duplicate of the first PUT.
+    p.startProgram(_Action({"program": "X.Program"}), _device())
+    assert 30 in p._test_clock.slept
+    gate_warnings = [c for c in p._test_api_logger.warning.call_args_list if "rate limit" in str(c)]
+    assert len(gate_warnings) == 1
+    assert [r["method"] for r in transport.requests] == ["PUT", "PUT"]   # no duplicate start
+
+
+# ---------------------------------------------------------------------------
+# Dynamic menus from cache (device resolved via targetId)
 # ---------------------------------------------------------------------------
 def test_program_list_from_cache_no_http_second_call(tmp_path):
     transport = ScriptedTransport()
@@ -153,20 +195,45 @@ def test_program_list_from_cache_no_http_second_call(tmp_path):
     indigo.devices._devices.clear()
     indigo.devices.add(dev)
     p._coordinator = _FakeCoord([_appliance()])
-    values = {"deviceId": str(dev.id)}
-    first = p.programListForDevice(valuesDict=values)
+    first = p.programListForDevice(targetId=dev.id)        # device via targetId (real contract)
     assert ("Dishcare.Dishwasher.Program.Auto2", "Auto") in first
     assert len(transport.requests) == 1
-    p.programListForDevice(valuesDict=values)       # cache hit -> no new HTTP
+    p.programListForDevice(targetId=dev.id)                # cache hit -> no new HTTP
     assert len(transport.requests) == 1
+
+
+def test_program_list_resolves_via_deviceid_fallback(tmp_path):
+    transport = ScriptedTransport()
+    transport.queue(200, HC_JSON, json.dumps({"data": {"programs": [{"key": "P1", "name": "One"}]}}))
+    p = _plugin(transport, tmp_path)
+    dev = _device()
+    indigo.devices._devices.clear()
+    indigo.devices.add(dev)
+    p._coordinator = _FakeCoord([_appliance()])
+    # No targetId (0) -> fall back to valuesDict["deviceId"].
+    options = p.programListForDevice(valuesDict={"deviceId": str(dev.id)}, targetId=0)
+    assert options == [("P1", "One")]
 
 
 def test_program_list_empty_without_device(tmp_path):
     transport = ScriptedTransport()
     p = _plugin(transport, tmp_path)
     p._coordinator = _FakeCoord([_appliance()])
-    assert p.programListForDevice(valuesDict={}) == []
-    assert p.programListForDevice(valuesDict={"deviceId": "0"}) == []
+    assert p.programListForDevice(targetId=0) == []
+    assert p.programListForDevice(valuesDict={}, targetId=0) == []
+
+
+def test_menu_fetch_failure_returns_empty_and_warns(tmp_path):
+    transport = ScriptedTransport()
+    transport.queue(403, HC_JSON, json.dumps({"error": {"key": "Forbidden"}}))   # not retried
+    p = _plugin(transport, tmp_path)
+    dev = _device()
+    indigo.devices._devices.clear()
+    indigo.devices.add(dev)
+    p._coordinator = _FakeCoord([_appliance()])
+    assert p.programListForDevice(targetId=dev.id) == []     # no raise into the ConfigUI thread
+    warnings = [c for c in p.logger.warning.call_args_list if "available programs" in str(c)]
+    assert len(warnings) == 1
 
 
 def test_power_state_list_filters_to_allowed(tmp_path):
@@ -179,7 +246,7 @@ def test_power_state_list_filters_to_allowed(tmp_path):
     indigo.devices._devices.clear()
     indigo.devices.add(dev)
     p._coordinator = _FakeCoord([_appliance()])
-    options = p.powerStateListForDevice(valuesDict={"deviceId": str(dev.id)})
+    options = p.powerStateListForDevice(targetId=dev.id)
     assert options == [("BSH.Common.EnumType.PowerState.On", "On")]
 
 
@@ -195,7 +262,7 @@ def test_command_list_from_cache(tmp_path):
     indigo.devices._devices.clear()
     indigo.devices.add(dev)
     p._coordinator = _FakeCoord([_appliance()])
-    keys = {k for k, _ in p.commandListForDevice(valuesDict={"deviceId": str(dev.id)})}
+    keys = {k for k, _ in p.commandListForDevice(targetId=dev.id)}
     assert keys == {"BSH.Common.Command.OpenDoor", PAUSE_COMMAND}
 
 

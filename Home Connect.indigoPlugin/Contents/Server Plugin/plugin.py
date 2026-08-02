@@ -399,21 +399,22 @@ class Plugin(indigo.PluginBase):
 
     # -- Control actions (Phase 4) -------------------------------------------
     def startProgram(self, action, dev=None):  # noqa: N802,N803
-        dev = dev or self._device_for_action(action)
+        dev, dev_id = self._resolve_action_device(action, dev)
         program = action.props.get("program", "")
         overrides = action.props.get("optionOverrides", "")
 
         def operation(controller, appliance):
             options = hc_control.parse_options(overrides)   # may raise ControlRefused
             controller.start_program(appliance, program, options)
-            # After a successful start, watch that OperationState actually leaves
-            # Ready — a start can fail appliance-side (door/water) with no error.
+            # Only after a successful start: watch that OperationState actually
+            # leaves Ready — a start can fail appliance-side (door/water) with no
+            # error. Reached only if start_program did not raise.
             hc_control.StartWatch(appliance, self._schedule_later, self.logger)
 
-        self._run_control(dev, "start program", operation)
+        self._run_control(dev, dev_id, "start program", operation)
 
     def selectProgram(self, action, dev=None):  # noqa: N802,N803
-        dev = dev or self._device_for_action(action)
+        dev, dev_id = self._resolve_action_device(action, dev)
         program = action.props.get("program", "")
         overrides = action.props.get("optionOverrides", "")
 
@@ -421,47 +422,53 @@ class Plugin(indigo.PluginBase):
             options = hc_control.parse_options(overrides)
             controller.select_program(appliance, program, options)
 
-        self._run_control(dev, "select program", operation)
+        self._run_control(dev, dev_id, "select program", operation)
 
-    def stopProgram(self, action, dev=None):  # noqa: N802,N803,ARG002
-        dev = dev or self._device_for_action(action)
-        self._run_control(dev, "stop program", lambda c, a: c.stop_program(a))
+    def stopProgram(self, action, dev=None):  # noqa: N802,N803
+        dev, dev_id = self._resolve_action_device(action, dev)
+        self._run_control(dev, dev_id, "stop program", lambda c, a: c.stop_program(a))
 
-    def pauseProgram(self, action, dev=None):  # noqa: N802,N803,ARG002
-        dev = dev or self._device_for_action(action)
-        self._run_control(dev, "pause program", lambda c, a: c.pause_program(a))
+    def pauseProgram(self, action, dev=None):  # noqa: N802,N803
+        dev, dev_id = self._resolve_action_device(action, dev)
+        self._run_control(dev, dev_id, "pause program", lambda c, a: c.pause_program(a))
 
-    def resumeProgram(self, action, dev=None):  # noqa: N802,N803,ARG002
-        dev = dev or self._device_for_action(action)
-        self._run_control(dev, "resume program", lambda c, a: c.resume_program(a))
+    def resumeProgram(self, action, dev=None):  # noqa: N802,N803
+        dev, dev_id = self._resolve_action_device(action, dev)
+        self._run_control(dev, dev_id, "resume program", lambda c, a: c.resume_program(a))
 
     def sendCommand(self, action, dev=None):  # noqa: N802,N803
-        dev = dev or self._device_for_action(action)
+        dev, dev_id = self._resolve_action_device(action, dev)
         command = action.props.get("command", "")
-        self._run_control(dev, "send command", lambda c, a: c.send_command(a, command))
+        self._run_control(dev, dev_id, "send command", lambda c, a: c.send_command(a, command))
 
     def setPowerState(self, action, dev=None):  # noqa: N802,N803
-        dev = dev or self._device_for_action(action)
+        dev, dev_id = self._resolve_action_device(action, dev)
         value = action.props.get("powerState", "")
-        self._run_control(dev, "set power state", lambda c, a: c.set_power(a, value))
+        self._run_control(dev, dev_id, "set power state", lambda c, a: c.set_power(a, value))
 
     def setSetting(self, action, dev=None):  # noqa: N802,N803
-        dev = dev or self._device_for_action(action)
+        dev, dev_id = self._resolve_action_device(action, dev)
         key = action.props.get("settingKey", "").strip()
         value = hc_control.coerce_value(action.props.get("settingValue", ""))
-        self._run_control(dev, "set setting", lambda c, a: c.set_setting(a, key, value))
+        self._run_control(dev, dev_id, "set setting", lambda c, a: c.set_setting(a, key, value))
 
-    def _run_control(self, dev, describe, operation):
+    def _run_control(self, dev, dev_id, describe, operation):
         """Resolve the appliance for ``dev`` and run ``operation(controller, appliance)``.
 
         Local refusals (:class:`hc_control.ControlRefused`) and API failures are
-        logged as user-actionable errors; nothing propagates back into Indigo."""
+        logged as user-actionable errors; nothing propagates back into Indigo. A
+        missing device is distinguished from an unconfigured action so the log
+        tells the user which they have."""
         controller = self._controller
         if controller is None:
             self.logger.error("Home Connect: not authorized yet — cannot %s", describe)
             return
         if dev is None:
-            self.logger.error("Home Connect: no device selected to %s", describe)
+            if dev_id:
+                self.logger.error("Home Connect: the device (id %s) for '%s' no longer exists",
+                                  dev_id, describe)
+            else:
+                self.logger.error("Home Connect: no device selected to %s", describe)
             return
         appliance = self._appliance_for_device(dev)
         if appliance is None:
@@ -481,14 +488,24 @@ class Plugin(indigo.PluginBase):
         timer.daemon = True
         timer.start()
 
-    def _device_for_action(self, action):
-        dev_id = getattr(action, "deviceId", 0) or 0
+    def _resolve_action_device(self, action, dev):
+        """Return ``(device, dev_id)`` for a control action.
+
+        A deviceFilter action passes the selected ``dev`` straight to the
+        callback; ``action.deviceId`` is the defensive fallback. ``(None, id)``
+        means the action names a device that no longer exists (deleted);
+        ``(None, 0)`` means no device is configured — the caller logs each
+        distinctly."""
+        if dev is not None:
+            return dev, getattr(dev, "id", 0) or 0
+        dev_id = _int_or_zero(getattr(action, "deviceId", 0))
         if not dev_id:
-            return None
+            return None, 0
         try:
-            return indigo.devices[dev_id]
-        except Exception:  # pylint: disable=broad-except
-            return None
+            return indigo.devices[dev_id], dev_id
+        except Exception as exc:  # pylint: disable=broad-except
+            self.logger.debug("Home Connect: action device %s not found: %s", dev_id, exc)
+            return None, dev_id
 
     def _appliance_for_device(self, dev):
         if dev is None:
@@ -497,12 +514,13 @@ class Plugin(indigo.PluginBase):
 
     # -- Action ConfigUI dynamic menus (served from the 24h capability cache) -
     def programListForDevice(self, filter="", valuesDict=None, typeId="", targetId=0):  # noqa: A002,N803,ARG002
-        controller, appliance = self._menu_appliance(valuesDict)
+        controller, appliance = self._menu_appliance(targetId, valuesDict)
         if appliance is None:
             return []
         try:
             programs = controller.available_programs(appliance)
-        except HomeConnectError:
+        except HomeConnectError as exc:
+            self.logger.warning("Home Connect: could not load available programs: %s", exc)
             return []
         options = []
         for program in programs:
@@ -515,12 +533,13 @@ class Plugin(indigo.PluginBase):
         return options
 
     def commandListForDevice(self, filter="", valuesDict=None, typeId="", targetId=0):  # noqa: A002,N803,ARG002
-        controller, appliance = self._menu_appliance(valuesDict)
+        controller, appliance = self._menu_appliance(targetId, valuesDict)
         if appliance is None:
             return []
         try:
             commands = controller.available_commands(appliance)
-        except HomeConnectError:
+        except HomeConnectError as exc:
+            self.logger.warning("Home Connect: could not load available commands: %s", exc)
             return []
         options = []
         for command in commands:
@@ -533,33 +552,43 @@ class Plugin(indigo.PluginBase):
         return options
 
     def powerStateListForDevice(self, filter="", valuesDict=None, typeId="", targetId=0):  # noqa: A002,N803,ARG002
-        controller, appliance = self._menu_appliance(valuesDict)
+        controller, appliance = self._menu_appliance(targetId, valuesDict)
         if appliance is None:
             return []
         try:
             allowed = controller.power_allowed_values(appliance)
-        except HomeConnectError:
+        except HomeConnectError as exc:
+            self.logger.warning("Home Connect: could not load power-state options: %s", exc)
             return []
         return [(value, hc.enum_tail(value)) for value in allowed if value]
 
-    def _menu_appliance(self, valuesDict):
-        """Resolve ``(controller, appliance)`` for the device chosen in an action
-        ConfigUI (deviceFilter stores its id in ``valuesDict['deviceId']``).
-        Returns ``(controller, None)`` when nothing usable is selected yet."""
+    def _menu_appliance(self, targetId, valuesDict):  # noqa: N803
+        """Resolve ``(controller, appliance)`` for an action ConfigUI dynamic menu.
+
+        The device a device-scoped action targets arrives as ``targetId`` (the
+        object being edited — the contract the E2E-validated indigo-matter plugin
+        relies on); ``valuesDict['deviceId']`` is a defensive fallback only. Every
+        empty-return path is logged so a blank picker is diagnosable rather than
+        silent."""
         controller = self._controller
-        if controller is None or not valuesDict:
-            return controller, None
-        try:
-            dev_id = int(valuesDict.get("deviceId") or 0)
-        except (TypeError, ValueError):
-            return controller, None
+        if controller is None:
+            self.logger.debug("Home Connect menu: no controller yet (not authorized)")
+            return None, None
+        dev_id = _int_or_zero(targetId)
+        if not dev_id and valuesDict:
+            dev_id = _int_or_zero(valuesDict.get("deviceId"))
         if not dev_id:
+            self.logger.debug("Home Connect menu: no target device selected yet")
             return controller, None
         try:
             dev = indigo.devices[dev_id]
-        except Exception:  # pylint: disable=broad-except
+        except Exception as exc:  # pylint: disable=broad-except
+            self.logger.warning("Home Connect menu: device %s not found: %s", dev_id, exc)
             return controller, None
-        return controller, self._appliance_for_device(dev)
+        appliance = self._appliance_for_device(dev)
+        if appliance is None:
+            self.logger.debug("Home Connect menu: appliance for device %s not discovered yet", dev_id)
+        return controller, appliance
 
     def validateActionConfigUi(self, valuesDict, typeId, deviceId):  # noqa: N802,N803,ARG002
         errors = indigo.Dict()
@@ -579,6 +608,14 @@ class Plugin(indigo.PluginBase):
         if len(errors) > 0:
             return (False, valuesDict, errors)
         return (True, valuesDict)
+
+
+def _int_or_zero(value):
+    """Coerce a dynamic-list id (str/int/None) to an int, defaulting to 0."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _supports_programs_for(info):
