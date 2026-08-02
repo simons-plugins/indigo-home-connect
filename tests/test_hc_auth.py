@@ -186,6 +186,33 @@ def test_refresh_invalid_grant_sets_auth_required(tmp_path):
     assert auth.state() == STATE_AUTH_REQUIRED
 
 
+def test_auth_required_halts_all_refresh_attempts_until_reauth(tmp_path):
+    """After invalid_grant, no further token requests may be sent (100/day refresh
+    limit): refresh_if_needed and handle_unauthorized must short-circuit without
+    HTTP until a successful re-auth resets the state."""
+    api = FakeAPI()
+    auth = make_auth(api, tmp_path)
+    _seed_token(auth, api)
+
+    api.queue_post(oauth_error("invalid_grant", status=400))
+    assert auth.refresh_if_needed(force=True) is False
+    assert auth.state() == STATE_AUTH_REQUIRED
+    posts_after_failure = len(api.post_calls)
+
+    # Minute-tick and 401-hook paths: zero network traffic while auth-required.
+    for _ in range(3):
+        assert auth.refresh_if_needed(force=True) is False
+    assert auth.handle_unauthorized(auth.authorization_header()) is False
+    assert len(api.post_calls) == posts_after_failure
+
+    # Successful re-auth (device flow completion calls _store_token) recovers.
+    auth._store_token({"access_token": "new-access", "refresh_token": "new-refresh",  # pylint: disable=protected-access
+                       "expires_in": 86400})
+    assert auth.state() == STATE_AUTHORIZED
+    api.queue_post({"access_token": "newer", "refresh_token": "newer-r", "expires_in": 86400})
+    assert auth.refresh_if_needed(force=True) is True
+
+
 def test_next_refresh_due_one_hour_before_expiry(tmp_path):
     api = FakeAPI()
     auth = make_auth(api, tmp_path)
