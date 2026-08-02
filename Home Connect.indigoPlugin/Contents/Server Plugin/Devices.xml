@@ -18,7 +18,6 @@
 				<Description>Some appliances report "off" as disconnected. Leave on to show Off; turn off to flag a device error when it disconnects.</Description>
 			</Field>
 		</ConfigUI>
-		<UiDisplayStateId>status</UiDisplayStateId>
 		<States>
 			<State id="connected">
 				<ValueType boolType="TrueFalse">Boolean</ValueType>
@@ -106,6 +105,7 @@
 				<ControlPageLabel>Rinse Aid Nearly Empty</ControlPageLabel>
 			</State>
 		</States>
+		<UiDisplayStateId>status</UiDisplayStateId>
 	</Device>
 
 	<Device type="custom" id="dryer">
@@ -124,7 +124,6 @@
 				<Description>Some appliances report "off" as disconnected. Leave on to show Off; turn off to flag a device error when it disconnects.</Description>
 			</Field>
 		</ConfigUI>
-		<UiDisplayStateId>status</UiDisplayStateId>
 		<States>
 			<State id="connected">
 				<ValueType boolType="TrueFalse">Boolean</ValueType>
@@ -207,6 +206,7 @@
 				<ControlPageLabel>Drying Target</ControlPageLabel>
 			</State>
 		</States>
+		<UiDisplayStateId>status</UiDisplayStateId>
 	</Device>
 
 	<Device type="custom" id="washer">
@@ -225,7 +225,6 @@
 				<Description>Some appliances report "off" as disconnected. Leave on to show Off; turn off to flag a device error when it disconnects.</Description>
 			</Field>
 		</ConfigUI>
-		<UiDisplayStateId>status</UiDisplayStateId>
 		<States>
 			<State id="connected">
 				<ValueType boolType="TrueFalse">Boolean</ValueType>
@@ -313,6 +312,7 @@
 				<ControlPageLabel>Temperature</ControlPageLabel>
 			</State>
 		</States>
+		<UiDisplayStateId>status</UiDisplayStateId>
 	</Device>
 
 	<Device type="custom" id="oven">
@@ -331,7 +331,6 @@
 				<Description>Some appliances report "off" as disconnected. Leave on to show Off; turn off to flag a device error when it disconnects.</Description>
 			</Field>
 		</ConfigUI>
-		<UiDisplayStateId>status</UiDisplayStateId>
 		<States>
 			<State id="connected">
 				<ValueType boolType="TrueFalse">Boolean</ValueType>
@@ -424,6 +423,7 @@
 				<ControlPageLabel>Preheat Finished</ControlPageLabel>
 			</State>
 		</States>
+		<UiDisplayStateId>status</UiDisplayStateId>
 	</Device>
 
 	<Device type="custom" id="coffeeMaker">
@@ -442,7 +442,6 @@
 				<Description>Some appliances report "off" as disconnected. Leave on to show Off; turn off to flag a device error when it disconnects.</Description>
 			</Field>
 		</ConfigUI>
-		<UiDisplayStateId>status</UiDisplayStateId>
 		<States>
 			<State id="connected">
 				<ValueType boolType="TrueFalse">Boolean</ValueType>
@@ -535,6 +534,7 @@
 				<ControlPageLabel>Drip Tray Full</ControlPageLabel>
 			</State>
 		</States>
+		<UiDisplayStateId>status</UiDisplayStateId>
 	</Device>
 
 	<Device type="custom" id="fridgeFreezer">
@@ -553,7 +553,6 @@
 				<Description>Some appliances report "off" as disconnected. Leave on to show Off; turn off to flag a device error when it disconnects.</Description>
 			</Field>
 		</ConfigUI>
-		<UiDisplayStateId>status</UiDisplayStateId>
 		<States>
 			<State id="connected">
 				<ValueType boolType="TrueFalse">Boolean</ValueType>
@@ -661,6 +660,7 @@
 				<ControlPageLabel>Freezer Super Mode</ControlPageLabel>
 			</State>
 		</States>
+		<UiDisplayStateId>status</UiDisplayStateId>
 	</Device>
 
 	<Device type="custom" id="homeConnectAppliance">
@@ -679,7 +679,6 @@
 				<Description>Some appliances report "off" as disconnected. Leave on to show Off; turn off to flag a device error when it disconnects.</Description>
 			</Field>
 		</ConfigUI>
-		<UiDisplayStateId>status</UiDisplayStateId>
 		<States>
 			<State id="connected">
 				<ValueType boolType="TrueFalse">Boolean</ValueType>
@@ -757,5 +756,6 @@
 				<ControlPageLabel>Status</ControlPageLabel>
 			</State>
 		</States>
+		<UiDisplayStateId>status</UiDisplayStateId>
 	</Device>
 </Devices>

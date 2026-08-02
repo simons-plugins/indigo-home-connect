@@ -106,9 +106,9 @@ def device_xml(type_id):
 \t\t\t\t<Description>Some appliances report "off" as disconnected. Leave on to show Off; turn off to flag a device error when it disconnects.</Description>
 \t\t\t</Field>
 \t\t</ConfigUI>
-\t\t<UiDisplayStateId>status</UiDisplayStateId>
 \t\t<States>
 {states}\t\t</States>
+\t\t<UiDisplayStateId>status</UiDisplayStateId>
 \t</Device>
 """
 
