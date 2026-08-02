@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<!-- Actions arrive in Phase 4: start/stop/pause/resume/select program,
+     power, set setting, send command. -->
+<Actions>
+</Actions>

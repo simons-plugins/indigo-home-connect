@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<!-- Phase 1 adds: client ID field, Authorize button (OAuth Device Flow),
+     simulator toggle. -->
+<PluginConfig>
+	<Field id="showDebugInfo" type="checkbox" defaultValue="false">
+		<Label>Enable debug logging:</Label>
+	</Field>
+</PluginConfig>

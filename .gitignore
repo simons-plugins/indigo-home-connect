@@ -1,0 +1,16 @@
+# Secrets — never commit
+.env
+*.tokens.json
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+
+# macOS / editors
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+.idea/

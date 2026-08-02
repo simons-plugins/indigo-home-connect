@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<!-- Device types arrive in Phase 3: dishwasher, dryer, washer, oven,
+     coffeeMaker, fridgeFreezer + homeConnectAppliance generic fallback. -->
+<Devices>
+</Devices>

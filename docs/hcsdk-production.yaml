@@ -1,0 +1,3673 @@
+swagger: "2.0"
+info:
+  title: "Home Connect API"
+  description: |
+    This API provides access to home appliances enabled by Home Connect
+    (https://home-connect.com). Through the API programs can be started and
+    stopped, or home appliances configured and monitored. For instance, you can
+    start a cotton program on a washer and get a notification when the cycle is
+    complete.
+
+    To get started with this web client, visit https://developer.home-connect.com
+    and register an account. An application with a client ID for this API client
+    will be automatically generated for you.
+
+    If you want to use your custom application here, please remember to set its
+    Redirect URI to https://apiclient.home-connect.com/o2c.html, otherwise
+    authorization process will fail.
+
+    In order to use this API in your own client, you need an OAuth 2 client
+    implementing the authorization code grant flow
+    (https://api-docs.home-connect.com/authorization?#authorization-code-grant-flow).
+
+
+    More details can be found here: https://www.rfc-editor.org/rfc/rfc6749.txt
+
+    Authorization URL: https://api.home-connect.com/security/oauth/authorize
+
+    Token URL: https://api.home-connect.com/security/oauth/token
+
+  version: "1"
+
+externalDocs:
+  description: Home Connect Developer Portal
+  url: "https://developer.home-connect.com/"
+host: api.home-connect.com
+schemes:
+  - "https"
+consumes:
+  - application/vnd.bsh.sdk.v1+json
+produces:
+  - application/vnd.bsh.sdk.v1+json
+basePath: /api
+tags:
+  - name: appliances
+    description: Enumerate your home appliances
+  - name: programs
+    description: Start, select, monitor and stop programs
+  - name: status
+    description: Get status
+  - name: events
+    description: Get value changes via SSE
+
+  - name: images
+    description: Access the camera in the fridge
+  - name: settings
+    description: Get and set settings
+  - name: commands
+    description: Send commands
+
+
+responses:
+  Unauthorized:
+    description: Unauthorized - No or invalid access token
+    schema:
+      $ref: '#/definitions/UnauthorizedError'
+  Forbidden:
+    description: Forbidden - Scope has not been granted
+    schema:
+      $ref: '#/definitions/ForbiddenError'
+  NotFound:
+    description: The requested resource was not found
+    schema:
+      $ref: '#/definitions/NotFoundError'
+  NoProgramSelected:
+    description: No program is currently selected
+    schema:
+      $ref: '#/definitions/NoProgramSelectedError'
+  NoProgramActive:
+    description: No program is currently active
+    schema:
+      $ref: '#/definitions/NoProgramActiveError'
+  NotAcceptable:
+    description: The resource identified by the request is only capable of generating response entities which have content characteristics not acceptable according to the accept headers sent in the request.
+    schema:
+      $ref: '#/definitions/NotAcceptableError'
+  RequestTimeout:
+    description: API Server failed to produce an answer or has no connection to backend service
+    schema:
+      $ref: '#/definitions/RequestTimeoutError'
+  HomeApplianceError:
+    description: |
+      An error occured during communication with the home appliance or the home appliance itself
+      answered with an error, e.g. because the issued command was unacceptable in the current state.
+    schema:
+      $ref: '#/definitions/ConflictError'
+  SelectedProgramNotSet:
+    description: No program is currently selected
+    schema:
+      $ref: '#/definitions/SelectedProgramNotSetError'
+  ActiveProgramNotSet:
+    description: No program is currently active
+    schema:
+      $ref: '#/definitions/ActiveProgramNotSetError'
+  WrongOperationState:
+    description: Request cannot be performed since the OperationState is wrong
+    schema:
+      $ref: '#/definitions/WrongOperationStateError'
+  ProgramNotAvailable:
+    description: The requested program is not available
+    schema:
+      $ref: '#/definitions/ProgramNotAvailableError'
+  ContentTypeError:
+    description: The request's Content-Type is not supported.
+    schema:
+      $ref: '#/definitions/UnsupportedMediaTypeError'
+  QuotaError:
+    description: |
+      The number of requests for a specific endpoint exceeded the quota of the client.
+    schema:
+      $ref: '#/definitions/TooManyRequestsError'
+  InternalError:
+    description: Internal Server Error
+    schema:
+      $ref: '#/definitions/InteralServerError'
+  Conflict:
+    description: Command/Query cannot be executed for the home appliance, the error response contains the error details
+    schema:
+      $ref: '#/definitions/Conflict'
+
+paths:
+  /homeappliances:
+    get:
+      summary: Get all home appliances which are paired with the logged-in user account
+      operationId: get_home_appliances
+      description: |
+        This endpoint returns a list of all home appliances which are paired
+        with the logged-in user account. All paired home appliances are returned
+        independent of their current connection state. The connection state can
+        be retrieved within the field 'connected' of the respective home appliance.
+        The haId is the primary access key for further API access to a specific
+        home appliance.
+      tags:
+        - appliances
+      responses:
+        200:
+          description: List of home appliances
+          schema:
+            $ref: '#/definitions/ArrayOfHomeAppliances'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - IdentifyAppliance
+  /homeappliances/{haId}:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+    get:
+      summary: Get a specfic home appliances which are paired with the logged-in user account
+      operationId: get_specific_appliance
+      description: |
+        This endpoint returns a specific home appliance which is paired with the
+        logged-in user account. It is returned independent of their current
+        connection state. The connection state can be retrieved within the field
+        'connected' of the respective home appliance.
+        The haId is the primary access key for further API access to a specific
+        home appliance.
+      tags:
+        - appliances
+      responses:
+        200:
+          description: Details of requested home appliance
+          schema:
+            $ref: '#/definitions/HomeAppliance'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - IdentifyAppliance
+
+
+
+
+  /homeappliances/{haId}/programs:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+    get:
+      summary: Get all programs of a given home appliance
+      tags:
+        - programs
+      operationId: get_all_programs
+      responses:
+        200:
+          description: List of all programs
+          schema:
+            $ref: '#/definitions/ArrayOfPrograms'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        409:
+          $ref: "#/responses/Conflict"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+            - Monitor
+            - Oven-Monitor
+            - Dishwasher-Monitor
+            - Washer-Monitor
+            - Dryer-Monitor
+            - CoffeeMaker-Monitor
+            - Hob-Monitor
+            - Hood-Monitor
+            - CleaningRobot-Monitor
+            - WasherDryer-Monitor
+            - Refrigerator-Monitor
+            - Freezer-Monitor
+            - WineCooler-Monitor
+            - CookProcessor-Monitor
+            - Oven
+            - Dishwasher
+            - Washer
+            - Dryer
+            - CoffeeMaker
+            - Hob
+            - Hood
+            - CleaningRobot
+            - WasherDryer
+            - Refrigerator
+            - Freezer
+            - WineCooler
+            - CookProcessor
+
+  /homeappliances/{haId}/programs/available:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+    get:
+      summary: Get all programs which are currently available on the given home appliance
+      tags:
+        - programs
+      operationId: get_available_programs
+      responses:
+        200:
+          description: List of available programs
+          schema:
+            $ref: '#/definitions/ArrayOfAvailablePrograms'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        409:
+          $ref: "#/responses/WrongOperationState"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Monitor
+          - Oven-Monitor
+          - Dishwasher-Monitor
+          - Washer-Monitor
+          - Dryer-Monitor
+          - CoffeeMaker-Monitor
+          - Hob-Monitor
+          - Hood-Monitor
+          - CleaningRobot-Monitor
+          - WasherDryer-Monitor
+          - Refrigerator-Monitor
+          - Freezer-Monitor
+          - WineCooler-Monitor
+          - CookProcessor-Monitor
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+  /homeappliances/{haId}/programs/available/{programkey}:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+      - name: programkey
+        in: path
+        description: key of specific program to return
+        required: true
+        type: string
+    get:
+      summary: Get a specific available program
+      tags:
+        - programs
+      operationId: get_available_program
+      responses:
+        200:
+          description: Available program
+          schema:
+            $ref: '#/definitions/ProgramDefinition'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        409:
+          $ref: "#/responses/ProgramNotAvailable"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Monitor
+          - Oven-Monitor
+          - Dishwasher-Monitor
+          - Washer-Monitor
+          - Dryer-Monitor
+          - CoffeeMaker-Monitor
+          - Hob-Monitor
+          - Hood-Monitor
+          - CleaningRobot-Monitor
+          - WasherDryer-Monitor
+          - Refrigerator-Monitor
+          - Freezer-Monitor
+          - WineCooler-Monitor
+          - CookProcessor-Monitor
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+
+  /homeappliances/{haId}/programs/active:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+    get:
+      summary: Get the active program
+      tags:
+        - programs
+      operationId: get_active_program
+      responses:
+        200:
+          description: Active program
+          schema:
+            $ref: '#/definitions/Program'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        404:
+          $ref: "#/responses/NoProgramActive"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        409:
+          $ref: "#/responses/HomeApplianceError"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Monitor
+          - Oven-Monitor
+          - Dishwasher-Monitor
+          - Washer-Monitor
+          - Dryer-Monitor
+          - CoffeeMaker-Monitor
+          - Hob-Monitor
+          - Hood-Monitor
+          - CleaningRobot-Monitor
+          - WasherDryer-Monitor
+          - Refrigerator-Monitor
+          - Freezer-Monitor
+          - WineCooler-Monitor
+          - CookProcessor-Monitor
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+    put:
+      summary: Start the given program
+      tags:
+        - programs
+      operationId: start_program
+      description: |
+        By putting a program object to this endpoint, the system will try to
+        start it if all preconditions are fulfilled:
+        * Home appliance is connected
+        * *Remote Control* and *Remote Control Start Allowed* is enabled
+        * No other program is currently active
+
+        Furthermore, the program must exist on the home appliance and its
+        options must be set correctly.
+        Keys of program, which can be exected on an oven, are for instance:
+        * *Cooking.Oven.Program.HeatingMode.HotAir*
+        * *Cooking.Oven.Program.HeatingMode.TopBottomHeating*
+        * *Cooking.Oven.Program.HeatingMode.PizzaSetting*
+        * *Cooking.Oven.Program.HeatingMode.PreHeating*
+
+        Keys for options of these oven programs are:
+        * *Cooking.Oven.Option.SetpointTemperature*: 30 - 250 °C
+        * *BSH.Common.Option.Duration*: 1 - 86340 seconds
+
+        For further documentation, visit the appliance-specific programs pages:
+        * [Cleaning Robot](https://api-docs.home-connect.com/programs-and-options?#cleaning-robot)
+        * [Coffee Machine](https://api-docs.home-connect.com/programs-and-options?#coffee-machine)
+        * [Cooktop](https://api-docs.home-connect.com/programs-and-options?#cooktop)
+        * [Cook Processor](https://api-docs.home-connect.com/programs-and-options?#cook-processor)
+        * [Dishwasher](https://api-docs.home-connect.com/programs-and-options?#dishwasher)
+        * [Dryer](https://api-docs.home-connect.com/programs-and-options?#dryer)
+        * [Hood](https://api-docs.home-connect.com/programs-and-options?#hood)
+        * [Oven](https://api-docs.home-connect.com/programs-and-options?#oven)
+        * [Warming Drawer](https://api-docs.home-connect.com/programs-and-options?#warming-drawer)
+        * [Washer](https://api-docs.home-connect.com/programs-and-options?#washer)
+        * [Washer Dryer](https://api-docs.home-connect.com/programs-and-options?#washer-dryer)
+
+        There are no programs available for freezers, fridge freezers, refrigerators and wine coolers.
+      parameters:
+        - name: body
+          in: body
+          description: Program to start
+          required: true
+          schema:
+            $ref: '#/definitions/Program'
+      responses:
+        204:
+          description: The request was successful
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        409:
+          $ref: "#/responses/HomeApplianceError"
+        415:
+          $ref: "#/responses/ContentTypeError"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Control
+          - Oven-Control
+          - Dishwasher-Control
+          - Washer-Control
+          - Dryer-Control
+          - CoffeeMaker-Control
+          - Hob-Control
+          - Hood-Control
+          - CleaningRobot-Control
+          - WasherDryer-Control
+          - Refrigerator-Control
+          - Freezer-Control
+          - WineCooler-Control
+          - CookProcessor-Control
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+    delete:
+      summary: Stop the active program
+      tags:
+        - programs
+      operationId: stop_program
+      responses:
+        204:
+          description: The request was successful
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        409:
+          $ref: "#/responses/WrongOperationState"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Control
+          - Oven-Control
+          - Dishwasher-Control
+          - Washer-Control
+          - Dryer-Control
+          - CoffeeMaker-Control
+          - Hob-Control
+          - Hood-Control
+          - CleaningRobot-Control
+          - WasherDryer-Control
+          - Refrigerator-Control
+          - Freezer-Control
+          - WineCooler-Control
+          - CookProcessor-Control
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+  /homeappliances/{haId}/programs/active/options:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+    get:
+      summary: Get all options of the active program
+      description: |
+        You can retrieve a list of options of the currently running program.
+
+        For detailed documentation of the available options, visit the appliance-specific programs pages:
+        * [Cleaning Robot](https://api-docs.home-connect.com/programs-and-options?#cleaning-robot)
+        * [Coffee Machine](https://api-docs.home-connect.com/programs-and-options?#coffee-machine)
+        * [Cooktop](https://api-docs.home-connect.com/programs-and-options?#cooktop)
+        * [Cook Processor](https://api-docs.home-connect.com/programs-and-options?#cook-processor)
+        * [Dishwasher](https://api-docs.home-connect.com/programs-and-options?#dishwasher)
+        * [Dryer](https://api-docs.home-connect.com/programs-and-options?#dryer)
+        * [Hood](https://api-docs.home-connect.com/programs-and-options?#hood)
+        * [Oven](https://api-docs.home-connect.com/programs-and-options?#oven)
+        * [Warming Drawer](https://api-docs.home-connect.com/programs-and-options?#warming-drawer)
+        * [Washer](https://api-docs.home-connect.com/programs-and-options?#washer)
+        * [Washer Dryer](https://api-docs.home-connect.com/programs-and-options?#washer-dryer)
+      tags:
+        - programs
+      operationId: get_active_program_options
+      responses:
+        200:
+          description: List of options of active program
+          schema:
+            $ref: '#/definitions/ArrayOfOptions'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        404:
+          $ref: "#/responses/NoProgramActive"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Monitor
+          - Oven-Monitor
+          - Dishwasher-Monitor
+          - Washer-Monitor
+          - Dryer-Monitor
+          - CoffeeMaker-Monitor
+          - Hob-Monitor
+          - Hood-Monitor
+          - CleaningRobot-Monitor
+          - WasherDryer-Monitor
+          - Refrigerator-Monitor
+          - Freezer-Monitor
+          - WineCooler-Monitor
+          - CookProcessor-Monitor
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+    put:
+      summary: Set all options of the active program
+      description: |
+        Update the options for the currently running program.
+        With this API endpoint, you have to provide all options with
+        their new values. If you want to update only one option, you can use the
+        endpoint specific to that option.
+
+        Please note that changing options of the running program is currently only
+        supported by ovens.
+      tags:
+        - programs
+      operationId: set_active_program_options
+      parameters:
+        - name: body
+          in: body
+          description: List of options to set
+          required: true
+          schema:
+            $ref: '#/definitions/ArrayOfOptions'
+      responses:
+        204:
+          description: The request was successful
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        409:
+          $ref: "#/responses/ActiveProgramNotSet"
+        415:
+          $ref: "#/responses/ContentTypeError"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Control
+          - Oven-Control
+          - Dishwasher-Control
+          - Washer-Control
+          - Dryer-Control
+          - CoffeeMaker-Control
+          - Hob-Control
+          - Hood-Control
+          - CleaningRobot-Control
+          - WasherDryer-Control
+          - Refrigerator-Control
+          - Freezer-Control
+          - WineCooler-Control
+          - CookProcessor-Control
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+  /homeappliances/{haId}/programs/active/options/{optionkey}:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+      - name: optionkey
+        in: path
+        description: Feature key of the option
+        required: true
+        type: string
+    get:
+      summary: Get a specific option of the active program
+      tags:
+        - programs
+      operationId: get_active_program_option
+      responses:
+        200:
+          description: Option of active program
+          schema:
+            $ref: '#/definitions/Option'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        404:
+          $ref: "#/responses/NoProgramActive"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Monitor
+          - Oven-Monitor
+          - Dishwasher-Monitor
+          - Washer-Monitor
+          - Dryer-Monitor
+          - CoffeeMaker-Monitor
+          - Hob-Monitor
+          - Hood-Monitor
+          - CleaningRobot-Monitor
+          - WasherDryer-Monitor
+          - Refrigerator-Control
+          - Freezer-Control
+          - WineCooler-Control
+          - CookProcessor-Control
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+    put:
+      summary: Set a specific option of the active program
+      description: |
+        This operation can be used to modify one specific option of the active
+        program, e.g. to extend the duration of the active program by
+        another 5 minutes.
+
+        Please note that changing options of the running program is currently only
+        supported by ovens.
+      tags:
+        - programs
+      operationId: set_active_program_option
+      parameters:
+        - name: body
+          in: body
+          description: Option of the active program to set
+          required: true
+          schema:
+            $ref: '#/definitions/Option'
+      responses:
+        204:
+          description: The request was successful
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        409:
+          $ref: "#/responses/ActiveProgramNotSet"
+        415:
+          $ref: "#/responses/ContentTypeError"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Control
+          - Oven-Control
+          - Dishwasher-Control
+          - Washer-Control
+          - Dryer-Control
+          - CoffeeMaker-Control
+          - Hob-Control
+          - Hood-Control
+          - CleaningRobot-Control
+          - WasherDryer-Control
+          - Refrigerator-Control
+          - Freezer-Control
+          - WineCooler-Control
+          - CookProcessor-Control
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+  /homeappliances/{haId}/programs/selected:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+    get:
+      summary: |
+        Get the selected program
+      description: |
+        In most cases the selected program is the program which is currently
+        shown on the display of the home appliance. This program can then be
+        manually adjusted or started on the home appliance itself.
+      tags:
+        - programs
+      operationId: get_selected_program
+      responses:
+        200:
+          description: Selected program
+          schema:
+            $ref: '#/definitions/Program'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        404:
+          $ref: "#/responses/NoProgramSelected"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Monitor
+          - Oven-Monitor
+          - Dishwasher-Monitor
+          - Washer-Monitor
+          - Dryer-Monitor
+          - CoffeeMaker-Monitor
+          - Hob-Monitor
+          - Hood-Monitor
+          - CleaningRobot-Monitor
+          - WasherDryer-Monitor
+          - Refrigerator-Monitor
+          - Freezer-Monitor
+          - WineCooler-Monitor
+          - CookProcessor-Monitor
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+    put:
+      summary: Select the given program
+      description: |
+        In most cases the selected program is the program which is currently
+        shown on the display of the home appliance. This program can then be
+        manually adjusted or started on the home appliance itself.
+
+        A selected program will not be started automatically. You don't have
+        to set a program as selected first if you intend to start it via API -
+        you can set it directly as active program.
+
+        Selecting a program will update the available options and constraints
+        directly from the home appliance. Any changes to the available options
+        due to the state of the appliance is only reflected in the selected program.
+      tags:
+        - programs
+      operationId: set_selected_program
+      parameters:
+        - name: body
+          in: body
+          description: Program to select
+          required: true
+          schema:
+            $ref: '#/definitions/Program'
+      responses:
+        204:
+          description: The request was successful
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        409:
+          $ref: "#/responses/HomeApplianceError"
+        415:
+          $ref: "#/responses/ContentTypeError"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Control
+          - Oven-Control
+          - Dishwasher-Control
+          - Washer-Control
+          - Dryer-Control
+          - CoffeeMaker-Control
+          - Hob-Control
+          - Hood-Control
+          - CleaningRobot-Control
+          - WasherDryer-Control
+          - Refrigerator-Control
+          - Freezer-Control
+          - WineCooler-Control
+          - CookProcessor-Control
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+  /homeappliances/{haId}/programs/selected/options:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+    get:
+      summary: Get all options of the selected program
+      tags:
+        - programs
+      operationId: get_selected_program_options
+      responses:
+        200:
+          description: List of options of selected program
+          schema:
+            $ref: '#/definitions/ArrayOfOptions'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        404:
+          $ref: "#/responses/NoProgramSelected"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Monitor
+          - Oven-Monitor
+          - Dishwasher-Monitor
+          - Washer-Monitor
+          - Dryer-Monitor
+          - CoffeeMaker-Monitor
+          - Hob-Monitor
+          - Hood-Monitor
+          - CleaningRobot-Monitor
+          - WasherDryer-Monitor
+          - Refrigerator-Monitor
+          - Freezer-Monitor
+          - WineCooler-Monitor
+          - CookProcessor-Monitor
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+    put:
+      summary: Set all options of the selected program
+      tags:
+        - programs
+      operationId: set_selected_program_options
+      parameters:
+        - name: body
+          in: body
+          description: List of opions to set
+          required: true
+          schema:
+            $ref: '#/definitions/ArrayOfOptions'
+      responses:
+        204:
+          description: The request was successful
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        409:
+          $ref: "#/responses/SelectedProgramNotSet"
+        415:
+          $ref: "#/responses/ContentTypeError"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Control
+          - Oven-Control
+          - Dishwasher-Control
+          - Washer-Control
+          - Dryer-Control
+          - CoffeeMaker-Control
+          - Hob-Control
+          - Hood-Control
+          - CleaningRobot-Control
+          - WasherDryer-Control
+          - Refrigerator-Control
+          - Freezer-Control
+          - WineCooler-Control
+          - CookProcessor-Control
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+  /homeappliances/{haId}/programs/selected/options/{optionkey}:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+      - name: optionkey
+        in: path
+        description: Feature key of the option
+        required: true
+        type: string
+    get:
+      summary: Get a specific option of the selected program
+      tags:
+        - programs
+      operationId: get_selected_program_option
+      responses:
+        200:
+          description: Option of selected program
+          schema:
+            $ref: '#/definitions/Option'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        404:
+          $ref: "#/responses/NoProgramSelected"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Monitor
+          - Oven-Monitor
+          - Dishwasher-Monitor
+          - Washer-Monitor
+          - Dryer-Monitor
+          - CoffeeMaker-Monitor
+          - Hob-Monitor
+          - Hood-Monitor
+          - CleaningRobot-Monitor
+          - WasherDryer-Monitor
+          - Refrigerator-Monitor
+          - Freezer-Monitor
+          - WineCooler-Monitor
+          - CookProcessor-Monitor
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+    put:
+      summary: Set a specific option of the selected program
+      tags:
+        - programs
+      operationId: set_selected_program_option
+      parameters:
+        - name: body
+          in: body
+          description: Option of the selected program to set
+          required: true
+          schema:
+            $ref: '#/definitions/Option'
+      responses:
+        204:
+          description: The request was successful
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        409:
+          $ref: "#/responses/SelectedProgramNotSet"
+        415:
+          $ref: "#/responses/ContentTypeError"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Control
+          - Oven-Control
+          - Dishwasher-Control
+          - Washer-Control
+          - Dryer-Control
+          - CoffeeMaker-Control
+          - Hob-Control
+          - Hood-Control
+          - CleaningRobot-Control
+          - WasherDryer-Control
+          - Refrigerator-Control
+          - Freezer-Control
+          - WineCooler-Control
+          - CookProcessor-Control
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+
+
+  /homeappliances/{haId}/images:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+    get:
+      summary: Get a list of available images
+      tags:
+        - images
+      operationId: get_images
+      responses:
+        200:
+          description: List of available images
+          schema:
+            $ref: '#/definitions/ArrayOfImages'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Images
+          - FridgeFreezer-Images
+          - FridgeFreezer
+
+
+  /homeappliances/{haId}/images/{imagekey}:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: imagekey
+        in: path
+        description: ID of the image
+        required: true
+        type: string
+    get:
+      summary: Get a specific image
+      tags:
+        - images
+      operationId: get_image
+      produces:
+        - image/jpeg
+      responses:
+        200:
+          description: Requested image
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        404:
+          description: The requested image was not found
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Images
+          - FridgeFreezer-Images
+          - FridgeFreezer
+
+
+
+  /homeappliances/{haId}/settings:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+    get:
+      summary: Get a list of available settings
+      description: |
+        Get a list of available setting of the home appliance.
+
+        Further documentation can be found [here](https://api-docs.home-connect.com/settings).
+      tags:
+        - settings
+      operationId: get_settings
+      responses:
+        200:
+          description: List of available settings
+          schema:
+            $ref: '#/definitions/ArrayOfSettings'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Settings
+          - Oven-Settings
+          - Dishwasher-Settings
+          - Washer-Settings
+          - Dryer-Settings
+          - FridgeFreezer-Settings
+          - CoffeeMaker-Settings
+          - Hob-Settings
+          - Hood-Settings
+          - CleaningRobot-Settings
+          - WasherDryer-Settings
+          - Refrigerator-Settings
+          - Freezer-Settings
+          - WineCooler-Settings
+          - CookProcessor-Settings
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - FridgeFreezer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+    put:
+      summary: Set multiple settings
+      tags:
+        - settings
+      operationId: set_settings
+      parameters:
+        - name: body
+          in: body
+          description: List of settings to set
+          required: true
+          schema:
+            $ref: '#/definitions/PutSettings'
+      responses:
+        204:
+          description: The request was successful
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        404:
+          $ref: "#/responses/NotFound"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        409:
+          $ref: "#/responses/HomeApplianceError"
+        415:
+          $ref: "#/responses/ContentTypeError"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Settings
+          - Oven-Settings
+          - Dishwasher-Settings
+          - Washer-Settings
+          - Dryer-Settings
+          - FridgeFreezer-Settings
+          - CoffeeMaker-Settings
+          - Hob-Settings
+          - Hood-Settings
+          - CleaningRobot-Settings
+          - WasherDryer-Settings
+          - Refrigerator-Settings
+          - Freezer-Settings
+          - WineCooler-Settings
+          - CookProcessor-Settings
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - FridgeFreezer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+
+  /homeappliances/{haId}/settings/{settingkey}:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+      - name: settingkey
+        in: path
+        description: ID of the setting
+        required: true
+        type: string
+    get:
+      summary: Get a specific setting
+      tags:
+        - settings
+      operationId: get_setting
+      responses:
+        200:
+          description: Requested setting
+          schema:
+            $ref: '#/definitions/GetSetting'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        404:
+          $ref: "#/responses/NotFound"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        409:
+          $ref: "#/responses/HomeApplianceError"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Settings
+          - Oven-Settings
+          - Dishwasher-Settings
+          - Washer-Settings
+          - Dryer-Settings
+          - FridgeFreezer-Settings
+          - CoffeeMaker-Settings
+          - Hob-Settings
+          - Hood-Settings
+          - CleaningRobot-Settings
+          - WasherDryer-Settings
+          - Refrigerator-Settings
+          - Freezer-Settings
+          - WineCooler-Settings
+          - CookProcessor-Settings
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - FridgeFreezer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+    put:
+      summary: Set a specific setting
+      tags:
+        - settings
+      operationId: set_setting
+      parameters:
+        - name: body
+          in: body
+          description: Specific setting to set
+          required: true
+          schema:
+            $ref: '#/definitions/PutSetting'
+      responses:
+        204:
+          description: The request was successful
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        404:
+          $ref: "#/responses/NotFound"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        409:
+          $ref: "#/responses/HomeApplianceError"
+        415:
+          $ref: "#/responses/ContentTypeError"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Settings
+          - Oven-Settings
+          - Dishwasher-Settings
+          - Washer-Settings
+          - Dryer-Settings
+          - FridgeFreezer-Settings
+          - CoffeeMaker-Settings
+          - Hob-Settings
+          - Hood-Settings
+          - CleaningRobot-Settings
+          - WasherDryer-Settings
+          - Refrigerator-Settings
+          - Freezer-Settings
+          - WineCooler-Settings
+          - CookProcessor-Settings
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - FridgeFreezer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+
+
+  /homeappliances/{haId}/status:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+    get:
+      summary: Get a list of available status
+      description: |
+        A detailed description of the available status can be found [here](https://api-docs.home-connect.com/states).
+      tags:
+        - status
+      operationId: get_status
+      responses:
+        200:
+          description: List of available status
+          schema:
+            $ref: '#/definitions/ArrayOfStatus'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        409:
+          $ref: "#/responses/HomeApplianceError"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Monitor
+          - Oven-Monitor
+          - Dishwasher-Monitor
+          - Washer-Monitor
+          - Dryer-Monitor
+          - FridgeFreezer-Monitor
+          - CoffeeMaker-Monitor
+          - Hob-Monitor
+          - Hood-Monitor
+          - CleaningRobot-Monitor
+          - WasherDryer-Monitor
+          - Refrigerator-Monitor
+          - Freezer-Monitor
+          - WineCooler-Monitor
+          - CookProcessor-Monitor
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - FridgeFreezer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+
+  /homeappliances/{haId}/status/{statuskey}:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+      - name: statuskey
+        in: path
+        description: key of the specific status to get
+        required: true
+        type: string
+    get:
+      summary: Get a specific status
+      description: |
+        A detailed description of the available status can be found [here](https://api-docs.home-connect.com/states).
+      tags:
+        - status
+      operationId: get_status_value
+      responses:
+        200:
+          description: Requested status
+          schema:
+            $ref: '#/definitions/Status'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        409:
+          $ref: "#/responses/HomeApplianceError"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Monitor
+          - Oven-Monitor
+          - Dishwasher-Monitor
+          - Washer-Monitor
+          - Dryer-Monitor
+          - FridgeFreezer-Monitor
+          - CoffeeMaker-Monitor
+          - Hob-Monitor
+          - Hood-Monitor
+          - CleaningRobot-Monitor
+          - WasherDryer-Monitor
+          - Refrigerator-Monitor
+          - Freezer-Monitor
+          - WineCooler-Monitor
+          - CookProcessor-Monitor
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - FridgeFreezer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+
+
+
+
+
+
+
+  /homeappliances/{haId}/commands:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+    get:
+      summary: Get a list of available and writable commands
+      tags:
+        - commands
+      operationId: get_available_commands
+      responses:
+        200:
+          description: List of available and writable commands
+          schema:
+            $ref: '#/definitions/ArrayOfCommands'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Control
+          - Oven-Control
+          - Dishwasher-Control
+          - Washer-Control
+          - Dryer-Control
+          - CoffeeMaker-Control
+          - FridgeFreezer-Control
+          - Hob-Control
+          - Hood-Control
+          - CleaningRobot-Control
+          - WasherDryer-Control
+          - Refrigerator-Control
+          - Freezer-Control
+          - WineCooler-Control
+          - CookProcessor-Control
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - FridgeFreezer
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+    put:
+      summary: Execute multiple commands
+      tags:
+        - commands
+      operationId: put_commands
+      parameters:
+        - name: body
+          in: body
+          description: List of commands to send
+          required: true
+          schema:
+            $ref: '#/definitions/PutCommands'
+      responses:
+        204:
+          description: The request was successful
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Control
+          - Oven-Control
+          - Dishwasher-Control
+          - Washer-Control
+          - Dryer-Control
+          - CoffeeMaker-Control
+          - FridgeFreezer-Control
+          - Hob-Control
+          - Hood-Control
+          - CleaningRobot-Control
+          - WasherDryer-Control
+          - Refrigerator-Control
+          - Freezer-Control
+          - WineCooler-Control
+          - CookProcessor-Control
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - FridgeFreezer
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+  /homeappliances/{haId}/commands/{commandkey}:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: commandkey
+        in: path
+        description: Feature key of the command
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+    put:
+      summary: Execute a specific command
+      tags:
+        - commands
+      operationId: put_command
+      parameters:
+        - name: body
+          in: body
+          description: Specific command to send
+          required: true
+          schema:
+            $ref: '#/definitions/PutCommand'
+      responses:
+        204:
+          description: The request was successful
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        408:
+          $ref: "#/responses/RequestTimeout"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Control
+          - Oven-Control
+          - Dishwasher-Control
+          - Washer-Control
+          - Dryer-Control
+          - CoffeeMaker-Control
+          - FridgeFreezer-Control
+          - Hob-Control
+          - Hood-Control
+          - CleaningRobot-Control
+          - WasherDryer-Control
+          - Refrigerator-Control
+          - Freezer-Control
+          - WineCooler-Control
+          - CookProcessor-Control
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - CoffeeMaker
+          - FridgeFreezer
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+
+
+
+  /homeappliances/events:
+    parameters:
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+    get:
+      summary: Get stream of events for all appliances - NOT WORKING WITH SWAGGER
+      tags:
+        - events
+      operationId: get_all_events
+      description: |
+        Server Sent Events are available as Eventsource API in JavaScript
+        and are implemented by various HTTP client libraries and tools
+        including curl.
+
+        Unfortunately, SSE is not compatible to OpenAPI specs and can therefore
+        not be properly specified within this API description.
+
+        An SSE event contains three parts separated by linebreaks: event, data and id.
+        Different events are separated by empty lines.
+
+        The event field can be one of these types: KEEP-ALIVE, STATUS, EVENT, NOTIFY, CONNECTED, DISCONNECTED, PAIRED, DEPAIRED.
+
+        In case of all event types (except KEEP-ALIVE), the "data" field is populated with the JSON object defined below.
+
+        The id contains the home appliance ID. (except for KEEP-ALIVE event type)
+
+        Further documentation can be found here:
+        * [Events availability matrix](https://api-docs.home-connect.com/events#availability-matrix)
+        * [Program changes](https://api-docs.home-connect.com/events#program-changes)
+        * [Option changes](https://api-docs.home-connect.com/events#option-changes)
+        * [Program progress changes](https://api-docs.home-connect.com/events#program-progress-changes)
+        * [Home appliance state changes](https://api-docs.home-connect.com/events#home-appliance-state-changes)
+      produces:
+        - text/event-stream
+      responses:
+        200:
+          description: |
+            Returns status updates as Server Sent Events (SSE)
+          schema:
+            $ref: '#/definitions/ArrayOfEvents'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Monitor
+          - Oven-Monitor
+          - Dishwasher-Monitor
+          - Washer-Monitor
+          - Dryer-Monitor
+          - FridgeFreezer-Monitor
+          - CoffeeMaker-Monitor
+          - Hob-Monitor
+          - Hood-Monitor
+          - CleaningRobot-Monitor
+          - WasherDryer-Monitor
+          - Refrigerator-Monitor
+          - Freezer-Monitor
+          - WineCooler-Monitor
+          - CookProcessor-Monitor
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - FridgeFreezer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+  /homeappliances/{haId}/events:
+    parameters:
+      - name: haId
+        in: path
+        description: ID of home appliance
+        required: true
+        type: string
+      - name: Accept-Language
+        in: header
+        description: Language for localized assets
+        type: string
+        enum:
+          - "de-DE"
+          - "en-GB"
+          - "en-US"
+      - name: Accept
+        in: header
+        type: string
+        enum:
+          - application/vnd.bsh.sdk.v1+json
+          - text/event-stream
+    get:
+      summary: Get stream of events for one appliance - NOT WORKING WITH SWAGGER
+      tags:
+        - events
+      operationId: get_events
+      description: |
+        If you want to do a one-time query of the current status, you can ask for
+        the content-type `application/vnd.bsh.sdk.v1+json` and get the status
+        as normal HTTP response.
+
+        If you want an ongoing stream of events in real time, ask for the content
+        type `text/event-stream` and you'll get a stream as Server Sent Events.
+
+        Server Sent Events are available as Eventsource API in JavaScript
+        and are implemented by various HTTP client libraries and tools
+        including curl.
+
+        Unfortunately, SSE is not compatible to OpenAPI specs and can therefore
+        not be properly specified within this API description.
+
+        An SSE event contains three parts separated by linebreaks: event, data and id.
+        Different events are separated by empty lines.
+
+        The event field can be one of these types: KEEP-ALIVE, STATUS, EVENT, NOTIFY, CONNECTED, DISCONNECTED.
+
+        In case of all event types (except KEEP-ALIVE), the "data" field is populated with the JSON object defined below.
+
+        The id contains the home appliance ID.
+
+        Further documentation can be found here:
+        * [Events availability matrix](https://api-docs.home-connect.com/events#availability-matrix)
+        * [Program changes](https://api-docs.home-connect.com/events#program-changes)
+        * [Option changes](https://api-docs.home-connect.com/events#option-changes)
+        * [Program progress changes](https://api-docs.home-connect.com/events#program-progress-changes)
+        * [Home appliance state changes](https://api-docs.home-connect.com/events#home-appliance-state-changes)
+      produces:
+        - application/vnd.bsh.sdk.v1+json
+        - text/event-stream
+      responses:
+        200:
+          description: |
+            Returns status updates as Server Sent Events (SSE)
+          schema:
+            $ref: '#/definitions/ArrayOfEvents'
+        401:
+          $ref: "#/responses/Unauthorized"
+        403:
+          $ref: "#/responses/Forbidden"
+        406:
+          $ref: "#/responses/NotAcceptable"
+        429:
+          $ref: "#/responses/QuotaError"
+        500:
+          $ref: "#/responses/InternalError"
+      security:
+        - homeconnect_auth:
+          - Monitor
+          - Oven-Monitor
+          - Dishwasher-Monitor
+          - Washer-Monitor
+          - Dryer-Monitor
+          - FridgeFreezer-Monitor
+          - CoffeeMaker-Monitor
+          - Hob-Monitor
+          - Hood-Monitor
+          - CleaningRobot-Monitor
+          - WasherDryer-Monitor
+          - Refrigerator-Monitor
+          - Freezer-Monitor
+          - WineCooler-Monitor
+          - CookProcessor-Monitor
+          - Oven
+          - Dishwasher
+          - Washer
+          - Dryer
+          - FridgeFreezer
+          - CoffeeMaker
+          - Hob
+          - Hood
+          - CleaningRobot
+          - WasherDryer
+          - Refrigerator
+          - Freezer
+          - WineCooler
+          - CookProcessor
+
+
+
+
+
+
+
+
+securityDefinitions:
+  homeconnect_auth:
+    description: |
+      The Home Connect API uses the authorization code grant flow of the OAuth2
+      Authorization Framework as specified in RFC 6749 (https://tools.ietf.org/html/rfc6749).
+      Authorization tokens have to be transmitted in the HTTP headers as defined
+      in RFC 6750 (https://tools.ietf.org/html/rfc6750).
+    type: oauth2
+    flow: accessCode
+    authorizationUrl: https://api.home-connect.com/security/oauth/authorize
+    tokenUrl: https://api.home-connect.com/security/oauth/token
+    x-homeconnect-revokeUrl: https://api.home-connect.com/security/oauth/revoke
+    x-homeconnect-deviceAuthorizationUrl: https://api.home-connect.com/security/oauth/device_authorization
+    scopes:
+      IdentifyAppliance: Grants right to identify a home appliance under /api/homeappliances
+
+      Monitor: Grants access to read resources under /api/homeappliances except images and settings
+      Control: Grants access to modify resources under under /api/homeappliances except images and settings
+      Images: Grants access to read resources under /api/homeappliances/{haId}/images
+      Settings: Grants access to read and modify resources under /api/homeappliances/{haId}/settings
+      Oven: Grants access to read or modify all resources under /api/homeappliances on ovens
+      Oven-Monitor: Grants access to read resources under /api/homeappliances except images and settings on ovens
+      Oven-Control: Grants access to modify resources under under /api/homeappliances except images and settings on ovens
+      Oven-Settings: Grants access to read and modify resources under /api/homeappliances/{haId}/settings on ovens
+      Dishwasher: Grants access to read or modify all resources under /api/homeappliances on dishwashers
+      Dishwasher-Monitor: Grants access to read resources under /api/homeappliances except images and settings on dishwashers
+      Dishwasher-Control: Grants access to modify resources under under /api/homeappliances except images and settings on dishwashers
+      Dishwasher-Settings: Grants access to read and modify resources under /api/homeappliances/{haId}/settings on dishwashers
+      Washer: Grants access to read or modify all resources under /api/homeappliances on washers
+      Washer-Monitor: Grants access to read resources under /api/homeappliances except images and settings on washers
+      Washer-Control: Grants access to modify resources under under /api/homeappliances except images and settings on washers
+      Washer-Settings: Grants access to read and modify resources under /api/homeappliances/{haId}/settings on washers
+      Dryer: Grants access to read or modify all resources under /api/homeappliances on dryers
+      Dryer-Monitor: Grants access to read resources under /api/homeappliances except images and settings on dryers
+      Dryer-Control: Grants access to modify resources under under /api/homeappliances except images and settings on dryers
+      Dryer-Settings: Grants access to read and modify resources under /api/homeappliances/{haId}/settings on dryers
+      WasherDryer: Grants access to read or modify all resources under /api/homeappliances on washerdryers
+      WasherDryer-Monitor: Grants access to read resources under /api/homeappliances except images and settings on washerdryers
+      WasherDryer-Control: Grants access to modify resources under under /api/homeappliances except images and settings on washerdryers
+      WasherDryer-Settings: Grants access to read and modify resources under /api/homeappliances/{haId}/settings on washerdryers
+      FridgeFreezer: Grants access to read or modify all resources under /api/homeappliances on fridgefreezers
+      FridgeFreezer-Monitor: Grants access to read resources under /api/homeappliances except images and settings on fridgefreezers
+      FridgeFreezer-Control: Grants access to modify resources under /api/homeappliances except images and settings on fridgefreezers
+      FridgeFreezer-Settings: Grants access to read and modify resources under /api/homeappliances/{haId}/settings on fridgefreezers
+      FridgeFreezer-Images: Grants access to read resources under /api/homeappliances/{haId}/images on fridgefreezers
+      CoffeeMaker: Grants access to read or modify all resources under /api/homeappliances on coffee makers
+      CoffeeMaker-Monitor: Grants access to read resources under /api/homeappliances except images and settings on coffee makers
+      CoffeeMaker-Control: Grants access to modify resources under under /api/homeappliances except images and settings on coffee makers
+      CoffeeMaker-Settings: Grants access to read and modify resources under /api/homeappliances/{haId}/settings on coffee makers
+      Hob: Grants access to read or modify all resources under /api/homeappliances on hobs
+      Hob-Monitor: Grants access to read resources under /api/homeappliances except images and settings on hobs
+      Hob-Control: Grants access to modify resources under under /api/homeappliances except images and settings on hobs
+      Hob-Settings: Grants access to read and modify resources under /api/homeappliances/{haId}/settings on hobs
+      Hood: Grants access to read or modify all resources under /api/homeappliances on hoods
+      Hood-Monitor: Grants access to read resources under /api/homeappliances except images and settings on hoods
+      Hood-Control: Grants access to modify resources under under /api/homeappliances except images and settings on hoods
+      Hood-Settings: Grants access to read and modify resources under /api/homeappliances/{haId}/settings on hoods
+      CleaningRobot: Grants access to read or modify all resources under /api/homeappliances on cleaning robots
+      CleaningRobot-Monitor: Grants access to read resources under /api/homeappliances except images and settings on cleaning robots
+      CleaningRobot-Control: Grants access to modify resources under under /api/homeappliances except images and settings on cleaning robots
+      CleaningRobot-Settings: Grants access to read and modify resources under /api/homeappliances/{haId}/settings on cleaning robots
+      Refrigerator: Grants access to read or modify all resources under /api/homeappliances on refrigerators
+      Refrigerator-Monitor: Grants access to read resources under /api/homeappliances except images and settings on refrigerators
+      Refrigerator-Control: Grants access to modify resources under under /api/homeappliances except images and settings on refrigerators
+      Refrigerator-Settings: Grants access to read and modify resources under /api/homeappliances/{haId}/settings on refrigerators
+      Freezer: Grants access to read or modify all resources under /api/homeappliances on freezers
+      Freezer-Monitor: Grants access to read resources under /api/homeappliances except images and settings on freezers
+      Freezer-Control: Grants access to modify resources under under /api/homeappliances except images and settings on freezers
+      Freezer-Settings: Grants access to read and modify resources under /api/homeappliances/{haId}/settings on freezers
+      WineCooler: Grants access to read or modify all resources under /api/homeappliances on wine coolers
+      WineCooler-Monitor: Grants access to read resources under /api/homeappliances except images and settings on wine coolers
+      WineCooler-Control: Grants access to modify resources under under /api/homeappliances except images and settings on wine coolers
+      WineCooler-Settings: Grants access to read and modify resources under /api/homeappliances/{haId}/settings on wine coolers
+      CookProcessor: Grants access to read or modify all resources under /api/homeappliances on cookprocessors
+      CookProcessor-Monitor: Grants access to read resources under /api/homeappliances except images and settings on cookprocessors
+      CookProcessor-Control: Grants access to modify resources under under /api/homeappliances except images and settings on cookprocessors
+      CookProcessor-Settings: Grants access to read and modify resources under /api/homeappliances/{haId}/settings on cookprocessors
+
+
+definitions:
+  HomeAppliance:
+    type: object
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        properties:
+          haId:
+            type: string
+            description: Unique identifier representing a specific home appliance
+          name:
+            type: string
+            description: iendly name of the home appliance
+          type:
+            type: string
+            description: Type of the home appliance
+          brand:
+            type: string
+            description: Brand of the home appliance
+          vib:
+            type: string
+            description: The type code (VIB) of the home appliance
+          enumber:
+            type: string
+            description: Combination of VIB and customer index (VIB/KI)
+          connected:
+            type: boolean
+            description: Current connection state of the home appliance. True if the home appliance is online, false otherwise
+
+    example:
+      data:
+        name: My Bosch Oven
+        brand: BOSCH
+        vib: HNG6764B6
+        connected: true
+        type: Oven
+        enumber: HNG6764B6/09
+        haId: BOSCH-HNG6764B6-0000000011FF
+
+
+  ArrayOfHomeAppliances:
+    type: object
+    description: |
+      Object containing an array of home appliances
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        required:
+          - homeappliances
+        properties:
+          homeappliances:
+            type: array
+            items:
+              type: object
+              required:
+                - haId
+                - name
+                - type
+                - brand
+                - vib
+                - enumber
+                - connected
+              properties:
+                haId:
+                  type: string
+                  description: Unique identifier representing a specific home appliance
+                name:
+                  type: string
+                  description: User-friendly name of the home appliance
+                type:
+                  type: string
+                  description: Type of the home appliance
+                brand:
+                  type: string
+                  description: Brand of the home appliance
+                vib:
+                  type: string
+                  description: The type code (VIB) of the home appliance
+                enumber:
+                  type: string
+                  description: Combination of VIB and customer index (VIB/KI)
+                connected:
+                  type: boolean
+                  description: Current connection state of the home appliance. True if the home appliance is online, false otherwise
+
+    example:
+      data:
+        homeappliances:
+          - name: My Bosch Oven
+            brand: BOSCH
+            vib: HNG6764B6
+            connected: true
+            type: Oven
+            enumber: HNG6764B6/09
+            haId: BOSCH-HNG6764B6-0000000011FF
+
+
+
+  UnauthorizedError:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: invalid_token
+        description: The access token expired
+  ForbiddenError:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: insufficient_scope
+        description: Insufficient scope for this resource
+  NotFoundError:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: "404"
+        description: The requested resource could not be found but may be available again in the future.
+  NoProgramSelectedError:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: SDK.Error.NoProgramSelected
+        description: There is no program selected
+  NoProgramActiveError:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: SDK.Error.NoProgramActive
+        description: There is no program active
+  NotAcceptableError:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: "406"
+        description: Resource representation is only available with these types:\napplication/vnd.bsh.sdk.v1+json
+  RequestTimeoutError:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: SDK.Error.408.RequestTimeout
+  ConflictError:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: SDK.Error.HomeAppliance.Connection.Initialization.Timeout
+        description: HomeAppliance did not respond to connection initialization requests in time, it might be offline
+  SelectedProgramNotSetError:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: SDK.Error.SelectedProgramNotSet
+        description: Request cannot be performed since no program is selected
+  ActiveProgramNotSetError:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: SDK.Error.ActiveProgramNotSet
+        description: Request cannot be performed since no active program is set
+  WrongOperationStateError:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: SDK.Error.WrongOperationState
+        description: Request cannot be performed since OperationState is not DelayedStart, Run, Pause or ActionRequired
+  ProgramNotAvailableError:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: SDK.Error.ProgramNotAvailable
+        description: Program currently not available
+  UnsupportedMediaTypeError:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: "415"
+        description: The request's Content-Type is not supported. Expected:\napplication/vnd.bsh.sdk.v1+json
+  TooManyRequestsError:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: "429"
+        description: The user has sent too many requests in a given amount of time.
+  InteralServerError:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: Internal Server Error
+        description: Could not validate permissions to access HomeAppliance
+  Conflict:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+          description:
+            type: string
+    example:
+      error:
+        key: "409"
+        description: Command/Query cannot be executed for the home appliance, the error response contains the error details
+
+
+
+
+  ArrayOfEvents:
+    type: object
+    required:
+      - items
+    properties:
+      items:
+        type: array
+        items:
+          type: object
+          required:
+            - key
+            - timestamp
+            - level
+            - handling
+            - value
+          properties:
+            key:
+              type: string
+              description: Feature key of the event
+            name:
+              type: string
+              description: User-friendly, localized name of the feature key
+            uri:
+              type: string
+              description: URI of the resource that changed
+            timestamp:
+              type: integer
+              format: int64
+              description: Creation time of event as unix timestamp
+            level:
+              type: string
+              description: |
+                Level of the event, possible values: critical, alert, warning, hint, info
+            handling:
+              type: string
+              description: |
+                Expected activity, possible values: none, acknowledge, decision
+            value:
+              type:
+                - string
+                - number
+                - boolean
+              description: New value, e.g. in case of a status update
+            displayvalue:
+              type: string
+              description: User-friendly, localized name of the enumeration value
+            unit:
+              type: string
+              description: Unit of the value
+    example:
+      items:
+        - key: Cooking.Oven.Option.SetpointTemperature
+          name: Target temperature for the oven
+          uri: /api/homeappliances/BOSCH-HNG6764B6-0000000011FF/programs/active/options/Cooking.Oven.Option.SetpointTemperature
+          timestamp: 1556793979
+          level: hint
+          handling: none
+          value: 200
+          unit: °C
+
+
+
+
+  Program:
+    type: object
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+            description: Feature key of the program
+          name:
+            type: string
+            description: User-friendly, localized name of the program
+          options:
+            type: array
+            items:
+              type: object
+              required:
+                - key
+                - value
+              properties:
+                key:
+                  type: string
+                  description: Feature key of the option
+                name:
+                  type: string
+                  description: User-friendly, localized name of the option
+                value:
+                  description: Value of the option specified in "key"
+                displayvalue:
+                  type: string
+                  description: User-friendly, localized name of the enumeration value
+                unit:
+                  type: string
+                  description: Unit of the option
+          constraints:
+            type: object
+            description: Constraints of the program
+            properties:
+              access:
+                type: string
+                description: Allowed access rights, readWrite or read
+    example:
+      data:
+        key: Cooking.Oven.Program.HeatingMode.HotAir
+        name: Hot air
+        options:
+          - key: Cooking.Oven.Option.SetpointTemperature
+            name: Target temperature for the cavity
+            value: 230
+            unit: °C
+          - key: BSH.Common.Option.Duration
+            name: Adjust the duration
+            value: 1200
+            unit: seconds
+        constraints:
+          access: readWrite
+
+  ArrayOfAvailablePrograms:
+    type: object
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        required:
+          - programs
+        properties:
+          programs:
+            type: array
+            items:
+              type: object
+              required:
+                - key
+              properties:
+                key:
+                  type: string
+                  description: Feature key of the program
+                name:
+                  type: string
+                  description: User-friendly, localized name of the program
+                constraints:
+                  type: object
+                  description: Constraints of the program
+                  properties:
+                    execution:
+                      type: string
+                      enum:
+                        - selectonly
+                        - startonly
+                        - selectandstart
+                      description: |
+                        Execution right of the program, possible values: selectonly, startonly, selectandstart
+    example:
+      data:
+        programs:
+          - key: Cooking.Oven.Program.HeatingMode.HotAir
+            name: Hot air
+            contraints:
+              execution: selectandstart
+          - key: Cooking.Oven.Program.HeatingMode.TopBottomHeating
+            name: Top/bottom heating
+            contraints:
+              execution: none
+          - key: Cooking.Oven.Program.HeatingMode.PizzaSetting
+            name: Pizza setting
+            contraints:
+              execution: startonly
+
+  ArrayOfPrograms:
+    type: object
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        required:
+          - programs
+        properties:
+          programs:
+            type: array
+            items:
+              type: object
+              required:
+                - key
+              properties:
+                key:
+                  type: string
+                  description: Feature key of the program
+                name:
+                  type: string
+                  description: user-friendly, localized name of the program
+                constraints:
+                  type: object
+                  description: Constraints of the program
+                  properties:
+                    available:
+                      type: boolean
+                      description: |
+                        Availability of the program
+                    execution:
+                      type: string
+                      enum:
+                        - none
+                        - selectonly
+                        - startonly
+                        - selectandstart
+                      description: |
+                        Execution right of the program, possible values: none, selectonly, startonly, selectandstart
+          active:
+            type: object
+            required:
+              - constraints
+            properties:
+              key:
+                type: string
+                description: Feature key of the program
+              name:
+                type: string
+                description: User-friendly, localized name of the program
+              options:
+                type: array
+                items:
+                  type: object
+                  required:
+                    - key
+                    - value
+                  properties:
+                    key:
+                      type: string
+                      description: Feature key of the option
+                    name:
+                      type: string
+                      description: User-friendly, localized name of the option
+                    value:
+                      description: Value of the option specified in "key"
+                    displayvalue:
+                      type: string
+                      description: User-friendly, localized name of the enumeration value
+                    unit:
+                      type: string
+                      description: Unit of the option
+              constraints:
+                type: object
+                description: Constraints of the program
+                properties:
+                  access:
+                    type: string
+                    description: Allowed access rights, readWrite or read
+          selected:
+            type: object
+            required:
+              - constraints
+            properties:
+              key:
+                type: string
+                description: Feature key of the program
+              name:
+                type: string
+                description: User-friendly, localized name of the program
+              options:
+                type: array
+                items:
+                  type: object
+                  required:
+                    - key
+                    - value
+                  properties:
+                    key:
+                      type: string
+                      description: Feature key of the option
+                    name:
+                      type: string
+                      description: User-friendly, localized name of the option
+                    value:
+                      description: Value of the option specified in "key"
+                    displayvalue:
+                      type: string
+                      description: User-friendly, localized name of the enumeration value
+                    unit:
+                      type: string
+                      description: Unit of the option
+              constraints:
+                type: object
+                description: Constraints of the program
+                properties:
+                  access:
+                    type: string
+                    description: Allowed access rights, readWrite or read
+    example:
+      data:
+        programs:
+          - key: Cooking.Oven.Program.HeatingMode.HotAir
+            name: Hot air
+            constraints:
+              available: true
+              execution: selectandstart
+          - key: Cooking.Oven.Program.HeatingMode.TopBottomHeating
+            name: Top/bottom heating
+            constraints:
+              available: true
+              execution: selectandstart
+          - key: Cooking.Oven.Program.HeatingMode.PizzaSetting
+            name: Pizza setting
+            constraints:
+              available: true
+              execution: selectonly
+        active:
+          constraints:
+            access: readWrite
+        selected:
+          key: Cooking.Oven.Program.HeatingMode.HotAir
+          name: Hot air
+          options:
+            - key: Cooking.Oven.Option.SetpointTemperature
+              name: Target temperature for the cavity
+              value: 230
+              unit: °C
+            - key: BSH.Common.Option.Duration
+              name: Adjust the duration
+              value: 1200
+              unit: seconds
+          constraints:
+            access: readWrite
+
+  ProgramDefinition:
+    type: object
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        required:
+          - key
+        properties:
+          key:
+            type: string
+            description: Feature key of the program
+          name:
+            type: string
+            description: User-friendly, localized name of the program
+          options:
+            type: array
+            items:
+              type: object
+              required:
+                - key
+                - type
+              properties:
+                key:
+                  type: string
+                  description: Feature key of the option
+                name:
+                  type: string
+                  description: User-friendly, localized name of the option
+                type:
+                  type: string
+                  description: Type of the option, possible values - String, Int, Boolean, {Enumtype}
+                unit:
+                  type: string
+                  description: Unit of the option
+                constraints:
+                  type: object
+                  description: Constraints of the option, e.g. step size, enumeration values, etc.
+                  properties:
+                    min:
+                      type: integer
+                      description: Minimum value of the option
+                    max:
+                      type: integer
+                      description: Maximum value of the option
+                    stepsize:
+                      type: integer
+                      description: Allowed step-size of the option
+                    allowedvalues:
+                      type: array
+                      description: List of allowed enumeration values
+                      items:
+                        type: string
+                    displayvalues:
+                      type: array
+                      description: List of user-friendly, localized names of all allowed enumeration values
+                      items:
+                        type: string
+                    default:
+                      description: Default value of the option
+                    liveupdate:
+                      type: boolean
+                      description: States whether the client should send value updates immediately when the option changed by the user
+    example:
+      data:
+        key: Cooking.Oven.Program.HeatingMode.HotAir
+        name: Hot air
+        options:
+          - key: Cooking.Oven.Option.SetpointTemperature
+            name: Target temperature for the cavity
+            type: Double
+            unit: °C
+            constraints:
+              min: 30
+              max: 275
+              default: 180
+              liveupdate: true
+          - key: BSH.Common.Option.Duration
+            name: Adjust the duration
+            type: Double
+            unit: seconds
+            constraints:
+              min: 1
+              max: 86340
+              default: 1800
+              liveupdate: true
+
+  Option:
+    type: object
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        required:
+          - key
+          - value
+        properties:
+          key:
+            type: string
+            description: Feature key of the option
+          name:
+            type: string
+            description: User-friendly, localized name of the option
+          value:
+            description: Value of the option specified in "key"
+          displayvalue:
+            type: string
+            description: User-friendly, localized name of the enumeration value
+          unit:
+            type: string
+            description: Unit of the option
+    example:
+      data:
+        key: Cooking.Oven.Option.SetpointTemperature
+        name: Target temperature for the cavity
+        value: 180
+        unit: °C
+
+  ArrayOfOptions:
+    type: object
+    description: List of options
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        required:
+          - options
+        properties:
+          options:
+            type: array
+            items:
+              type: object
+              required:
+                - key
+                - value
+              properties:
+                key:
+                  type: string
+                  description: Feature key of the option
+                name:
+                  type: string
+                  description: User-friendly, localized name of the option
+                value:
+                  description: Value of the option specified in "key"
+                displayvalue:
+                  type: string
+                  description: User-friendly, localized name of the enumeration value
+                unit:
+                  type: string
+                  description: Unit of the option
+    example:
+      data:
+        options:
+          - key: Cooking.Oven.Option.SetpointTemperature
+            name: Target temperature for the cavity
+            value: 230
+            unit: °C
+          - key: BSH.Common.Option.Duration
+            name: Adjust the duration
+            value: 1200
+            unit: seconds
+
+
+  ArrayOfImages:
+    type: object
+    description: List of images available from the home appliance
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        required:
+          - images
+        properties:
+          images:
+            type: array
+            items:
+              type: object
+              required:
+                - key
+                - imagekey
+                - previewimagekey
+                - timestamp
+                - quality
+              properties:
+                key:
+                  type: string
+                  description: Feature key of image type
+                name:
+                  type: string
+                  description: User-friendly, localized name of the image type
+                imagekey:
+                  type: string
+                  description: Unique identifier for the image
+                previewimagekey:
+                  type: string
+                  description: Unique identifier for the preview image
+                timestamp:
+                  type: integer
+                  format: int64
+                  description: Unix timestamp when the image was shot
+                quality:
+                  type: string
+                  description: |
+                    Quality of the captured image, possible values: good, bad:
+                    image is flagged bad e.g. if the door has been closed too fast to shoot a sharp picture
+    example:
+      data:
+        images:
+          - key: Refrigeration.FridgeFreezer.Status.DoorCameraPresentRefrigerator
+            imagekey: 56e2ceea1f0000ab54d661f3
+            previewimagekey: 56e2cee91f0000a654d661f1
+            timestamp: 1457704646
+            quality: good
+          - key: Refrigeration.FridgeFreezer.Status.InteriorCameraPresentRefrigerator
+            imagekey: 56e2cee91f0000a654d661f2
+            previewimagekey: 56e2cee91f0000a654d661f0
+            timestamp: 1457704646
+            quality: good
+
+
+  GetSetting:
+    type: object
+    description: Specific setting of the home appliance
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        required:
+          - key
+          - value
+        properties:
+          key:
+            type: string
+            description: Feature key of the setting
+          name:
+            type: string
+            description: User-friendly, localized name of the setting
+          value:
+            description: Value of the setting specified in "key"
+          displayvalue:
+            type: string
+            description: User-friendly, localized name of the enumeration value
+          unit:
+            type: string
+            description: Unit of the setting
+          type:
+            type: string
+            description: Type of the setting, possible values - String, Int, Boolean, {Enumtype}
+          constraints:
+            type: object
+            description: Constraints of the setting, e.g. step size, enumeration values, etc.
+            properties:
+              min:
+                type: integer
+                description: Minimum value of the setting
+              max:
+                type: integer
+                description: Maximum value of the setting
+              stepsize:
+                type: integer
+                description: Allowed step-size of the setting
+              allowedvalues:
+                type: array
+                description: List of allowed enumeration values
+                items:
+                  type: string
+              displayvalues:
+                type: array
+                description: List of user-friendly, localized names of all allowed enumeration values
+                items:
+                  type: string
+              default:
+                description: Default value of the HA feature
+              access:
+                type: string
+                description: Allowed access rights, readWrite or read
+
+    example:
+      data:
+        key: BSH.Common.Setting.PowerState
+        name: Power status
+        value: BSH.Common.EnumType.PowerState.On
+        displayvalue: Standby
+        type: BSH.Common.EnumType.PowerState
+        constraints:
+          allowedvalues:
+            - BSH.Common.EnumType.PowerState.On
+            - BSH.Common.EnumType.PowerState.Standby
+          displayvalues:
+            - 'On'
+            - Standby
+          access: readWrite
+
+  ArrayOfSettings:
+    type: object
+    description: List of settings of the home appliance
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        required:
+          - settings
+        properties:
+          settings:
+            type: array
+            items:
+              type: object
+              required:
+                - key
+                - value
+              properties:
+                key:
+                  type: string
+                  description: Feature key of the setting
+                name:
+                  type: string
+                  description: User-friendly, localized name of the setting
+                value:
+                  description: Value of the setting specified in "key"
+                displayvalue:
+                  type: string
+                  description: User-friendly, localized name of the enumeration value
+                unit:
+                  type: string
+                  description: Unit of the setting
+
+    example:
+      data:
+        settings:
+          - key: BSH.Common.Setting.PowerState
+            name: Power status
+            value: BSH.Common.EnumType.PowerState.On
+            displayvalue: 'On'
+          - key: BSH.Common.Setting.ChildLock
+            name: Childproof lock
+            value: false
+
+  PutSetting:
+    type: object
+    description: Specific setting of the home appliance
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        required:
+          - key
+          - value
+        properties:
+          key:
+            type: string
+            description: Feature key of the setting
+          value:
+            description: Value of the setting specified in "key"
+
+    example:
+      data:
+        key: BSH.Common.Setting.PowerState
+        value: BSH.Common.EnumType.PowerState.On
+
+  PutSettings:
+    type: object
+    description: List of settings of the home appliance
+    required:
+      - data
+    properties:
+      data:
+        type: array
+        items:
+          type: object
+          required:
+            - key
+            - value
+          properties:
+            key:
+              type: string
+              description: Feature key of the setting
+            value:
+              description: Value of the setting specified in "key"
+
+    example:
+      data:
+        - key: Refrigeration.FridgeFreezer.Setting.SuperModeFreezer
+          value: true
+        - key: Refrigeration.FridgeFreezer.Setting.SuperModeRefrigerator
+          value: true
+
+
+  Status:
+    type: object
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        required:
+          - key
+          - value
+        properties:
+          key:
+            type: string
+            description: Feature key of the status
+          name:
+            type: string
+            description: User-friendly, localized name of the status key
+          value:
+            description: Value of the status specified in "key"
+          displayvalue:
+            type: string
+            description: User-friendly, localized name of the enumeration value
+          unit:
+            type: string
+            description: Unit of the status
+          type:
+            type: string
+            description: Type of the status, possible values - String, Int, Boolean, {Enumtype}
+          constraints:
+            type: object
+            description: Constraints of the status, e.g. step size, enumeration values, etc.
+            properties:
+              min:
+                type: integer
+                description: Minimum value of the status
+              max:
+                type: integer
+                description: Maximum value of the status
+              stepsize:
+                type: integer
+                description: Allowed step-size of the status
+              allowedvalues:
+                type: array
+                description: List of allowed enumeration values
+                items:
+                  type: string
+              displayvalues:
+                type: array
+                description: List of user-friendly, localized names of all allowed enumeration values
+                items:
+                  type: string
+              default:
+                description: Default value of the status
+              access:
+                type: string
+                description: Allowed access rights, always set to read
+    example:
+      data:
+        key: BSH.Common.Status.OperationState
+        name: Operation state
+        value: BSH.Common.EnumType.OperationState.Ready
+        displayvalue: Inactive
+        type: BSH.Common.EnumType.OperationState
+        constraints:
+          allowedvalues:
+            - BSH.Common.EnumType.OperationState.Inactive
+            - BSH.Common.EnumType.OperationState.Ready
+            - BSH.Common.EnumType.OperationState.DelayedStart
+            - BSH.Common.EnumType.OperationState.Run
+            - BSH.Common.EnumType.OperationState.Pause
+            - BSH.Common.EnumType.OperationState.ActionRequired
+            - BSH.Common.EnumType.OperationState.Finished
+            - BSH.Common.EnumType.OperationState.Error
+            - BSH.Common.EnumType.OperationState.Aborting
+          displayvalues:
+            - Inactive
+            - Ready",
+            - Delayed start
+            - Running
+            - Paused
+            - Action required
+            - Completed
+            - Error
+            - Aborting
+          access: read
+
+  ArrayOfStatus:
+    type: object
+    description: List of status of the home appliance
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        required:
+          - status
+        properties:
+          status:
+            type: array
+            items:
+              type: object
+              required:
+                - key
+                - value
+              properties:
+                key:
+                  type: string
+                  description: Feature key of the status
+                name:
+                  type: string
+                  description: User-friendly, localized name of the status key
+                value:
+                  description: Value of the status specified in "key"
+                displayvalue:
+                  type: string
+                  description: User-friendly, localized name of the enumeration value
+                unit:
+                  type: string
+                  description: Unit of the status
+    example:
+      data:
+        status:
+          - key: BSH.Common.Status.LocalControlActive
+            name: Local operation active
+            value: false
+          - key: BSH.Common.Status.OperationState
+            name: Operation state
+            value: BSH.Common.EnumType.OperationState.Inactive
+            displayvalue: Inactive
+          - key: BSH.Common.Status.DoorState
+            name: Door
+            value: BSH.Common.EnumType.DoorState.Closed
+            displayvalue: Closed
+
+
+
+
+
+
+  ArrayOfCommands:
+    type: object
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        required:
+          - commands
+        properties:
+          commands:
+            type: array
+            items:
+              type: object
+              required:
+                - key
+              properties:
+                key:
+                  type: string
+                  description: Feature key of the command
+                name:
+                  type: string
+                  description: User-friendly, localized name of the command
+    example:
+      data:
+        commands:
+          - key: BSH.Common.Command.PauseProgram
+            name: Stop the programme
+          - key: BSH.Common.Command.ResumeProgram
+            name: Continue the programme
+
+  PutCommand:
+    type: object
+    required:
+      - data
+    properties:
+      data:
+        type: object
+        required:
+          - key
+          - value
+        properties:
+          key:
+            type: string
+            description: Feature key of the command
+          value:
+            description: Value of the command specified in "key"
+    example:
+      data:
+        key: BSH.Common.Command.PauseProgram
+        value: true
+
+  PutCommands:
+    type: object
+    description: A list of commands of the home appliance
+    required:
+      - data
+    properties:
+      data:
+        type: array
+        items:
+          type: object
+          required:
+            - key
+            - value
+          properties:
+            key:
+              type: string
+              description: Feature key of the command
+            value:
+              description: Value of the command specified in "key"
+
+    example:
+      data:
+        - key: BSH.Common.Command.PauseProgram
+          value: true
+
+
+
+
+
+
+
