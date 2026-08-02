@@ -1,6 +1,7 @@
 # Secrets — never commit
 .env
 *.tokens.json
+.live_tokens.json
 
 # Python
 __pycache__/
