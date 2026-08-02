@@ -388,6 +388,8 @@ class HomeConnectAuth:
         if not entry:
             return False
         with self._lock:
+            if self._state == STATE_AUTH_REQUIRED:
+                return False              # dead refresh token: re-auth required, don't resubmit
             now = self._now()
             due_at = entry["expires_at"] - REFRESH_WINDOW
             if not force and now < due_at:
