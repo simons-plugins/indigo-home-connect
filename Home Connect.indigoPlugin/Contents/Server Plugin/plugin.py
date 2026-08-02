@@ -514,21 +514,36 @@ class Plugin(indigo.PluginBase):
 
     # -- Action ConfigUI dynamic menus (served from the 24h capability cache) -
     def programListForDevice(self, filter="", valuesDict=None, typeId="", targetId=0):  # noqa: A002,N803,ARG002
+        """Program menu for Start / Select, built from the ALL-programs list.
+
+        Uses ``GET /programs`` (not ``/programs/available``) because on some
+        appliances the available-list only reflects the dial's current program
+        (see hc_control.all_programs). Every program is listed; one whose
+        ``constraints.available`` is False is suffixed "(not currently available)"
+        — the appliance is authoritative and rejects an unusable pick with a clear
+        error. ``execution=none`` programs (not startable at all) are excluded;
+        other execution values are not filtered on. Localized ``name`` is used
+        when present, falling back to the prettified key tail."""
         controller, appliance = self._menu_appliance(targetId, valuesDict)
         if appliance is None:
             return []
         try:
-            programs = controller.available_programs(appliance)
+            programs = controller.all_programs(appliance)
         except HomeConnectError as exc:
-            self.logger.warning("Home Connect: could not load available programs: %s", exc)
+            self.logger.warning("Home Connect: could not load programs: %s", exc)
             return []
         options = []
         for program in programs:
             key = program.get("key")
             if not key:
                 continue
-            name = program.get("name") or hc.prettify_program(hc.enum_tail(key))
-            options.append((key, name))
+            constraints = program.get("constraints") or {}
+            if constraints.get("execution") == "none":
+                continue
+            label = program.get("name") or hc.prettify_program(hc.enum_tail(key))
+            if constraints.get("available", True) is False:
+                label += " (not currently available)"
+            options.append((key, label))
         options.sort(key=lambda item: item[1].lower())
         return options
 

@@ -252,10 +252,19 @@ class Controller:
             raise ControlRefused(f"{appliance.name} is powered off")
 
     # -- Capability lookups (24 h cache; one live fetch on a miss) ------------
-    def available_programs(self, appliance):
-        """Cached list of available-program dicts (``key`` + ``name``)."""
+    def all_programs(self, appliance):
+        """Cached list of ALL program dicts (``key`` + localized ``name`` +
+        ``constraints``), built from ``GET /programs`` — not ``/programs/available``.
+
+        Field finding: on some appliances the available-list reflects only the
+        program currently on the appliance's dial (observed live: a Bosch dryer
+        returned 1 available while ``/programs`` returned 13), so it is useless as
+        a start-/select-menu source. The caller marks each entry from
+        ``constraints.available`` and lets the appliance stay authoritative — it
+        rejects an unusable pick with a clear error. Cached under a key distinct
+        from any available-list entry."""
         haid = appliance.haid
-        return self._cache.get(f"programs:{haid}", lambda: self._load_programs(haid))
+        return self._cache.get(f"all-programs:{haid}", lambda: self._load_all_programs(haid))
 
     def available_commands(self, appliance):
         """Cached list of available-command dicts. ``[]`` when unsupported (404)."""
@@ -267,8 +276,8 @@ class Controller:
         haid = appliance.haid
         return self._cache.get(f"power:{haid}", lambda: self._load_power_values(haid))
 
-    def _load_programs(self, haid):
-        data = self._api.get_json(f"/api/homeappliances/{haid}/programs/available")
+    def _load_all_programs(self, haid):
+        data = self._api.get_json(f"/api/homeappliances/{haid}/programs")
         return (data or {}).get("data", {}).get("programs", []) or []
 
     def _load_commands(self, haid):

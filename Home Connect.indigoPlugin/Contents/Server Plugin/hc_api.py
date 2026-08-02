@@ -41,6 +41,12 @@ BUDGET_WARN_AT = 800
 DEFAULT_TIMEOUT = 30
 DEFAULT_MAX_RETRIES = 3
 
+# BSH returns localized program/option/setting display ``name``s keyed off the
+# request's Accept-Language. No config UI for it (PRD keeps auth-only prefs); a
+# module constant is enough to get the app's names ("Kurz 60" etc.) instead of
+# raw key tails. GB English matches Simon's appliances.
+DEFAULT_ACCEPT_LANGUAGE = "en-GB"
+
 _HAID_IN_PATH = re.compile(r"(homeappliances/)([^/?]+)")
 
 
@@ -198,8 +204,12 @@ class HomeConnectAPI:
         self._on_unauthorized = handler
 
     # -- Public request helpers ---------------------------------------------
-    def get_json(self, path, authorize=True):
-        raw = self.request("GET", path, accept=HC_CONTENT_TYPE, authorize=authorize)
+    def get_json(self, path, authorize=True, accept_language=DEFAULT_ACCEPT_LANGUAGE):
+        """GET + parse JSON. ``accept_language`` sets the ``Accept-Language`` header
+        so BSH returns localized display ``name``s (menus show the app's names, not
+        raw key tails); pass ``None`` to omit it."""
+        headers = {"Accept-Language": accept_language} if accept_language else None
+        raw = self.request("GET", path, headers=headers, accept=HC_CONTENT_TYPE, authorize=authorize)
         return self._parse_json(raw, path)
 
     def put_json(self, path, payload, authorize=True, no_retry=False):

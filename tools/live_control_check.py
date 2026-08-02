@@ -140,13 +140,14 @@ def main():
               f"connected={dishwasher.connected}, "
               f"remoteStart={dishwasher.get('BSH.Common.Status.RemoteControlStartAllowed')}")
 
-        # Pick a program to drive.
+        # Pick a program to drive (prefer one the appliance reports available).
         try:
-            programs = controller.available_programs(dishwasher)
+            programs = controller.all_programs(dishwasher)
         except HomeConnectError as exc:
             programs = []
-            print(f"  (could not read available programs: {exc})")
-        program_key = programs[0]["key"] if programs else "BSH.Common.Program.Favorite.001"
+            print(f"  (could not read programs: {exc})")
+        usable = [p for p in programs if (p.get("constraints") or {}).get("available", True)]
+        program_key = (usable or programs or [{"key": "BSH.Common.Program.Favorite.001"}])[0]["key"]
         print(f"Using program: {hc.enum_tail(program_key)}\n")
 
         print("Control sequence:")

@@ -228,6 +228,23 @@ def test_no_retry_start_refreshes_and_resends_on_401():
     assert len(transport.requests) == 2     # one 401, one resend — success
 
 
+def test_get_json_sends_accept_language_header():
+    transport = ScriptedTransport()
+    transport.queue(200, HC_JSON, json.dumps({"data": {}}))
+    api = make_api(transport)
+    api.get_json("/api/homeappliances/x/programs")
+    headers = transport.requests[0]["headers"]
+    assert headers.get("Accept-Language") == "en-GB"       # localized display names
+
+
+def test_get_json_omits_accept_language_when_none():
+    transport = ScriptedTransport()
+    transport.queue(200, HC_JSON, json.dumps({"data": {}}))
+    api = make_api(transport)
+    api.get_json("/api/homeappliances", accept_language=None)
+    assert "Accept-Language" not in transport.requests[0]["headers"]
+
+
 def test_no_retry_start_401_without_handler_raises_once():
     transport = ScriptedTransport()
     transport.queue(401, {"content-type": "application/json"}, json.dumps({"error": "x"}))

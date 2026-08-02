@@ -374,18 +374,31 @@ def test_set_setting_data_key_matches_path(tmp_path):
 # ---------------------------------------------------------------------------
 # Capability menus served from cache (no HTTP on the second call)
 # ---------------------------------------------------------------------------
-def test_available_programs_cached_after_first_fetch(tmp_path):
+def test_all_programs_cached_after_first_fetch(tmp_path):
     transport = ScriptedTransport()
     body = json.dumps({"data": {"programs": [{"key": "P1", "name": "Eco 50"}]}})
     transport.queue(200, HC_JSON, body)
     controller = make_controller(transport, tmp_path)
     appliance = make_appliance()
-    first = controller.available_programs(appliance)
+    first = controller.all_programs(appliance)
     assert first == [{"key": "P1", "name": "Eco 50"}]
-    count_after_first = len(transport.requests)
-    second = controller.available_programs(appliance)     # from cache: no new HTTP
+    # Built from GET /programs (the all-programs list), not /programs/available.
+    assert transport.requests[0]["url"] == f"/api/homeappliances/{HAID}/programs"
+    second = controller.all_programs(appliance)           # from cache: no new HTTP
     assert second == first
-    assert len(transport.requests) == count_after_first == 1
+    assert len(transport.requests) == 1
+
+
+def test_all_programs_distinct_cache_key(tmp_path):
+    # The all-programs fetch must not collide with a same-haId power/commands entry.
+    transport = ScriptedTransport()
+    transport.queue(200, HC_JSON, json.dumps({"data": {"programs": [{"key": "P1"}]}}))
+    _queue_commands(transport, PAUSE_COMMAND)
+    controller = make_controller(transport, tmp_path)
+    appliance = make_appliance()
+    assert controller.all_programs(appliance) == [{"key": "P1"}]
+    assert {c["key"] for c in controller.available_commands(appliance)} == {PAUSE_COMMAND}
+    assert len(transport.requests) == 2                   # two distinct keys, two fetches
 
 
 def test_available_commands_404_cached_as_empty(tmp_path):

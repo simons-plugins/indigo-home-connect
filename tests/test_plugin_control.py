@@ -55,9 +55,9 @@ def _plugin(transport, tmp_path):
     return p
 
 
-def _appliance(op="Ready"):
+def _appliance(op="Ready", hc_type="Dishwasher"):
     appliance = HomeConnectAppliance(
-        HAID, {"name": "Dishwasher", "type": "Dishwasher", "connected": True},
+        HAID, {"name": hc_type, "type": hc_type, "connected": True},
         Mock(), Mock(), logger=Mock())
     appliance.merge_items([
         {"key": OPERATION_STATE, "value": f"BSH.Common.EnumType.OperationState.{op}"},
@@ -232,8 +232,49 @@ def test_menu_fetch_failure_returns_empty_and_warns(tmp_path):
     indigo.devices.add(dev)
     p._coordinator = _FakeCoord([_appliance()])
     assert p.programListForDevice(targetId=dev.id) == []     # no raise into the ConfigUI thread
-    warnings = [c for c in p.logger.warning.call_args_list if "available programs" in str(c)]
+    warnings = [c for c in p.logger.warning.call_args_list if "could not load programs" in str(c)]
     assert len(warnings) == 1
+
+
+def test_program_list_dryer_regression_lists_all_with_unavailable_suffixed(tmp_path):
+    # Field scenario: /programs returns 13 (one available=False), while
+    # /programs/available would return only 1. The menu must list all 13, the
+    # unavailable one suffixed, and exclude an execution=none entry.
+    programs = [{"key": f"P{i}", "name": f"Program {i}",
+                 "constraints": {"available": True, "execution": "selectandstart"}}
+                for i in range(13)]
+    programs[3]["constraints"]["available"] = False          # one not currently available
+    programs.append({"key": "PNone", "name": "Diagnosis",
+                     "constraints": {"execution": "none"}})   # never startable -> excluded
+    transport = ScriptedTransport()
+    transport.queue(200, HC_JSON, json.dumps({"data": {"programs": programs}}))
+    p = _plugin(transport, tmp_path)
+    dev = _device()
+    indigo.devices._devices.clear()
+    indigo.devices.add(dev)
+    p._coordinator = _FakeCoord([_appliance(hc_type="Dryer")])
+    options = p.programListForDevice(targetId=dev.id)
+    assert len(options) == 13                                # all real programs, none dropped
+    labels = {k: label for k, label in options}
+    assert labels["P3"].endswith("(not currently available)")
+    assert labels["P0"] == "Program 0"                       # available -> no suffix
+    assert "PNone" not in labels                             # execution=none excluded
+
+
+def test_program_list_prefers_localized_name_else_key_tail(tmp_path):
+    transport = ScriptedTransport()
+    transport.queue(200, HC_JSON, json.dumps({"data": {"programs": [
+        {"key": "LaundryCare.Dryer.Program.Cotton", "name": "Baumwolle"},   # localized name
+        {"key": "LaundryCare.Dryer.Program.Mix60"},                          # no name -> key tail
+    ]}}))
+    p = _plugin(transport, tmp_path)
+    dev = _device()
+    indigo.devices._devices.clear()
+    indigo.devices.add(dev)
+    p._coordinator = _FakeCoord([_appliance(hc_type="Dryer")])
+    labels = {k: label for k, label in p.programListForDevice(targetId=dev.id)}
+    assert labels["LaundryCare.Dryer.Program.Cotton"] == "Baumwolle"        # localized wins
+    assert labels["LaundryCare.Dryer.Program.Mix60"] == "Mix 60"            # prettified key tail
 
 
 def test_power_state_list_filters_to_allowed(tmp_path):
