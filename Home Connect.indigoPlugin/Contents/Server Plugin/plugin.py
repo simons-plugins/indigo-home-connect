@@ -107,6 +107,7 @@ class Plugin(indigo.PluginBase):
         api, auth = self._api, self._auth
         coordinator = HomeConnectCoordinator(
             api, logger=self.logger, on_appliance=self._appliance_discovered,
+            supports_programs_for=_supports_programs_for,
             auth_ok=lambda: auth.state() == STATE_AUTHORIZED)
         try:
             if coordinator.start():
@@ -375,3 +376,12 @@ def _as_bool(value):
     if isinstance(value, str):
         return value.strip().lower() in ("true", "on", "yes", "1")
     return bool(value)
+
+
+def _supports_programs_for(info):
+    """Resolve an appliance's program support from its HC ``type`` at discovery.
+
+    Settings-only appliances (fridge/freezer family) return ``False`` so their
+    re-read queue skips the selected/active-program endpoints entirely (PRD §3.2
+    budget)."""
+    return hc.supports_programs(hc.device_type_for((info or {}).get("type")))
