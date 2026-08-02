@@ -3,6 +3,7 @@ swallowing, scheduler, and the coordinator."""
 import json
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from unittest.mock import Mock
 
@@ -230,6 +231,59 @@ def test_event_stream_reconnects_honoring_retry_after_gate():
     assert sum(clock.slept) >= 30
 
 
+class _StubStreamResp:
+    def __init__(self, text_lines):
+        self._lines = list(text_lines)
+
+    def lines(self):
+        return iter(self._lines)
+
+    def close(self):
+        pass
+
+
+class _StubApi:
+    """Records open_stream calls; serves queued streams or raises queued errors."""
+
+    def __init__(self, items):
+        self._items = deque(items)
+        self.open_calls = 0
+
+    def open_stream(self, path, read_timeout=None):  # noqa: ARG002
+        self.open_calls += 1
+        item = self._items.popleft()
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def test_event_stream_pauses_on_auth_required_and_resumes():
+    # While auth_ok() is False the loop must NOT open the stream (no reconnect
+    # storm with a dead token); it resumes once authorization returns.
+    api = _StubApi([_StubStreamResp(["event:STATUS", "id:H", "data:{}", ""])])
+    state = {"ok": False}
+    dispatched = []
+    stop = threading.Event()
+
+    def dispatch(event):
+        dispatched.append(event.event)
+        if event.event == STATUS:
+            stop.set()
+
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        state["ok"] = True             # authorization recovers after one idle poll
+
+    EventStream(api, dispatch=dispatch, logger=Mock(), sleep=fake_sleep,
+                auth_ok=lambda: state["ok"], auth_poll=30.0).run(stop)
+
+    assert api.open_calls == 1          # never opened while paused; opened once on resume
+    assert sleeps == [30.0]             # exactly one idle poll before recovery
+    assert dispatched == [START, STATUS, STOP]
+
+
 # -- Coordinator --------------------------------------------------------------
 
 class StubStream:
@@ -262,9 +316,53 @@ def test_coordinator_start_stop_thread_hygiene():
     coord, stub = make_coordinator([])
     coord.start()
     assert stub.started.wait(2.0)
-    coord.stop(timeout=2.0)
+    assert coord.stop(timeout=2.0) is True
     assert coord._stream_thread is None      # pylint: disable=protected-access
     assert coord._worker_thread is None      # pylint: disable=protected-access
+
+
+class StuckStream:
+    """A reader that close() cannot unblock — models a recv() that outlives the
+    join timeout, so stop()'s thread-death verification is actually exercised."""
+
+    def __init__(self):
+        self.started = threading.Event()
+        self._release = threading.Event()
+        self.close_calls = 0
+
+    def run(self, stop_event):  # noqa: ARG002 - deliberately ignores stop_event
+        self.started.set()
+        self._release.wait()
+
+    def close(self):
+        self.close_calls += 1    # does NOT release the reader
+
+    def release(self):
+        self._release.set()
+
+
+def test_coordinator_stop_warns_and_refuses_double_start_when_reader_stuck():
+    api = FakeAPI()
+    api.get_json = lambda path: {"data": {"homeappliances": []}}
+    stuck = StuckStream()
+    logger = Mock()
+    coord = HomeConnectCoordinator(api, logger=logger, stream=stuck)
+
+    assert coord.start() is True
+    assert stuck.started.wait(2.0)
+
+    # close() cannot interrupt the reader before the join timeout: stop() must
+    # report failure (not silently claim stopped) and keep the live ref.
+    assert coord.stop(timeout=0.2) is False
+    assert stuck.close_calls >= 1
+    assert any("did not stop" in str(c) for c in logger.warning.call_args_list)
+
+    # A second live stream must be impossible while the reader is still alive.
+    assert coord.start() is False
+
+    # Clean up: let the reader exit, then a real stop succeeds.
+    stuck.release()
+    assert coord.stop(timeout=2.0) is True
 
 
 def test_coordinator_discovers_appliances_once():

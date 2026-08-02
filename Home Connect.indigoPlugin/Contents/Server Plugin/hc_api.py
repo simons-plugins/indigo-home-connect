@@ -13,6 +13,7 @@ import http.client
 import json
 import logging
 import re
+import socket
 import time
 import urllib.parse
 from datetime import datetime, timezone
@@ -131,6 +132,14 @@ class StreamResponse:
         if self._closed:
             return
         self._closed = True
+        # shutdown() interrupts a recv() blocked in another thread promptly;
+        # conn.close() alone does not reliably wake a cross-thread blocked read.
+        sock = getattr(self._conn, "sock", None)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         try:
             self._conn.close()
         except Exception:  # pylint: disable=broad-except
@@ -246,43 +255,57 @@ class HomeConnectAPI:
 
         Goes through the shared request gate (so a 429 ``Retry-After`` from a
         failed open pushes the gate for *all* requests) and counts one request
-        against the daily budget. Non-2xx responses raise a :class:`HomeConnectError`;
-        the caller (``hc_events``) runs the reconnect loop.
+        against the daily budget. A 401 is routed through the same unauthorized
+        handler as :meth:`request` — one forced token refresh, then a single
+        retry — so a reconnect loop never re-opens forever with a dead token.
+        Non-2xx responses (after that single retry) raise a
+        :class:`HomeConnectError`; the caller (``hc_events``) runs the reconnect
+        loop.
         """
-        self._wait_for_gate()
-        conn = self._connection_factory(self._host, read_timeout)
-        req_headers = {"Accept": accept, "User-Agent": self._user_agent, "Cache-Control": "no-cache"}
-        if authorize and self._token_provider:
-            token = self._token_provider()
-            self._last_used_token = token
-            if token:
-                req_headers["Authorization"] = f"Bearer {token}"
-        else:
-            self._last_used_token = None
+        unauthorized_retried = False
+        while True:
+            self._wait_for_gate()
+            conn = self._connection_factory(self._host, read_timeout)
+            req_headers = {"Accept": accept, "User-Agent": self._user_agent,
+                           "Cache-Control": "no-cache"}
+            if authorize and self._token_provider:
+                token = self._token_provider()
+                self._last_used_token = token
+                if token:
+                    req_headers["Authorization"] = f"Bearer {token}"
+            else:
+                self._last_used_token = None
 
-        self._count_request()
-        try:
-            conn.request("GET", path, headers=req_headers)
-            resp = conn.getresponse()
-        except (OSError, http.client.HTTPException) as exc:
+            self._count_request()
+            try:
+                conn.request("GET", path, headers=req_headers)
+                resp = conn.getresponse()
+            except (OSError, http.client.HTTPException) as exc:
+                self._safe_close(conn)
+                raise HomeConnectError(
+                    f"transport error opening stream {redact_path(path)}: {exc}") from exc
+
+            if 200 <= resp.status < 300:
+                return StreamResponse(conn, resp, path, self._logger)
+
+            # Failed to open: drain a small error body, honor Retry-After.
+            headers = {k.lower(): v for k, v in resp.getheaders()}
+            try:
+                body = resp.read()
+            except (OSError, http.client.HTTPException):
+                body = b""
             self._safe_close(conn)
-            raise HomeConnectError(
-                f"transport error opening stream {redact_path(path)}: {exc}") from exc
+            raw = RawResponse(resp.status, headers, body)
+            if resp.status == 429:
+                self._apply_retry_after(raw)
+            err = self._build_error(raw, "GET", path)
 
-        if 200 <= resp.status < 300:
-            return StreamResponse(conn, resp, path, self._logger)
-
-        # Failed to open: drain a small error body, honor Retry-After, then raise.
-        headers = {k.lower(): v for k, v in resp.getheaders()}
-        try:
-            body = resp.read()
-        except (OSError, http.client.HTTPException):
-            body = b""
-        self._safe_close(conn)
-        raw = RawResponse(resp.status, headers, body)
-        if resp.status == 429:
-            self._apply_retry_after(raw)
-        raise self._build_error(raw, "GET", path)
+            if resp.status == 401 and not unauthorized_retried:
+                handler = self._on_unauthorized
+                if handler and handler(self._last_used_token):
+                    unauthorized_retried = True
+                    continue                  # refreshed token -> retry the open once
+            raise err
 
     @staticmethod
     def _safe_close(conn):

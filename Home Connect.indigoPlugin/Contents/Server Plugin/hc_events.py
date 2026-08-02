@@ -40,6 +40,9 @@ DISCOVERY_INTERVAL = 60 * 60          # appliance-list poll at most hourly (PRD 
 RECONNECT_MIN_DELAY = 1.0
 RECONNECT_MAX_DELAY = 60.0
 
+# How often the paused reader re-checks whether authorization has returned.
+AUTH_POLL_INTERVAL = 30.0
+
 # Synthetic (internal) event types plus the wire types we route.
 START = "START"
 STOP = "STOP"
@@ -163,7 +166,8 @@ class EventStream:
 
     def __init__(self, api, dispatch, logger=None, path=EVENTS_PATH,
                  read_timeout=STREAM_READ_TIMEOUT, sleep=None,
-                 reconnect_min=RECONNECT_MIN_DELAY, reconnect_max=RECONNECT_MAX_DELAY):
+                 reconnect_min=RECONNECT_MIN_DELAY, reconnect_max=RECONNECT_MAX_DELAY,
+                 auth_ok=None, auth_poll=AUTH_POLL_INTERVAL):
         self._api = api
         self._dispatch = dispatch
         self._logger = logger or logging.getLogger("hc_events")
@@ -172,12 +176,27 @@ class EventStream:
         self._sleep = sleep
         self._reconnect_min = reconnect_min
         self._reconnect_max = reconnect_max
+        # auth_ok() -> True while authorized; False halts the reconnect loop
+        # (e.g. refresh failed with invalid_grant -> STATE_AUTH_REQUIRED). The
+        # loop idles and resumes only when authorization returns (PRD §6).
+        self._auth_ok = auth_ok
+        self._auth_poll = auth_poll
         self._current = None
         self._current_lock = threading.Lock()
 
     def run(self, stop_event):
         backoff = 0.0
+        auth_paused_logged = False
         while not stop_event.is_set():
+            if self._auth_ok is not None and not self._auth_ok():
+                if not auth_paused_logged:
+                    self._logger.error("Home Connect event stream paused: authorization required "
+                                       "— re-authorize the plugin in its configuration.")
+                    auth_paused_logged = True
+                self._wait(stop_event, self._auth_poll)   # idle; re-check, never open_stream
+                continue
+            auth_paused_logged = False
+
             error = None
             try:
                 stream = self._api.open_stream(self._path, read_timeout=self._read_timeout)
@@ -357,7 +376,8 @@ class HomeConnectCoordinator:
 
     def __init__(self, api, logger=None, monotonic=time.monotonic,
                  on_appliance=None, on_event=None, supports_programs=True,
-                 discovery_interval=DISCOVERY_INTERVAL, stream=None, scheduler=None):
+                 discovery_interval=DISCOVERY_INTERVAL, stream=None, scheduler=None,
+                 auth_ok=None):
         self._api = api
         self._logger = logger or logging.getLogger("hc_events")
         self._monotonic = monotonic
@@ -368,7 +388,8 @@ class HomeConnectCoordinator:
 
         self._reader = ApiReader(api)
         self._scheduler = scheduler or Scheduler(logger=self._logger, monotonic=monotonic)
-        self._stream = stream or EventStream(api, dispatch=self._dispatch, logger=self._logger)
+        self._stream = stream or EventStream(api, dispatch=self._dispatch,
+                                             logger=self._logger, auth_ok=auth_ok)
 
         self._lock = threading.RLock()
         self._appliances = {}
@@ -378,6 +399,13 @@ class HomeConnectCoordinator:
 
     # -- Lifecycle -----------------------------------------------------------
     def start(self):
+        """Start the reader + worker threads. Returns ``False`` (refusing) if a
+        previous thread is still alive — a second live stream must be impossible."""
+        for thread in (self._stream_thread, self._worker_thread):
+            if thread is not None and thread.is_alive():
+                self._logger.warning("Home Connect coordinator: refusing to start; %s still alive",
+                                     thread.name)
+                return False
         self._stop.clear()
         self._worker_thread = threading.Thread(
             target=self._scheduler.run, args=(self._stop,), name="hc-worker", daemon=True)
@@ -387,17 +415,34 @@ class HomeConnectCoordinator:
             target=self._stream.run, args=(self._stop,), name="hc-events", daemon=True)
         self._stream_thread.start()
         self._logger.debug("Home Connect coordinator started")
+        return True
 
     def stop(self, timeout=5.0):
+        """Signal shutdown and join both threads. Returns ``True`` only when both
+        actually died; if a thread is still blocked after ``timeout`` it logs a
+        warning, keeps the live ref (so :meth:`start` refuses a double-stream)
+        and returns ``False`` — the caller must retry rather than assume stopped."""
         self._stop.set()
-        self._stream.close()                  # unblock a reader stuck in read()
+        self._stream.close()                  # shutdown()+close() to unblock read()
         self._scheduler.wake()                # unblock the worker's wait()
+        alive = []
         for thread in (self._stream_thread, self._worker_thread):
             if thread is not None:
                 thread.join(timeout)
+                if thread.is_alive():
+                    alive.append(thread)
+        if alive:
+            for thread in alive:
+                self._logger.warning("Home Connect coordinator: %s did not stop within %.0fs; "
+                                     "will not start a second stream", thread.name, timeout)
+            # Keep only the still-alive refs so start() can see and refuse them.
+            self._stream_thread = self._stream_thread if self._stream_thread in alive else None
+            self._worker_thread = self._worker_thread if self._worker_thread in alive else None
+            return False
         self._stream_thread = None
         self._worker_thread = None
         self._logger.debug("Home Connect coordinator stopped")
+        return True
 
     def appliances(self):
         with self._lock:

@@ -40,6 +40,10 @@ class Plugin(indigo.PluginBase):
         self._auth_thread = None
         self._stop_auth = threading.Event()
         self._coordinator = None
+        self._coordinator_api = None      # the api the running coordinator is wired to
+        # Guards the api/auth/coordinator triad against races between the config
+        # UI thread (rebuild) and runConcurrentThread (reconcile every 60s).
+        self._coord_lock = threading.RLock()
 
     # -- Lifecycle -----------------------------------------------------------
     def startup(self):
@@ -49,7 +53,8 @@ class Plugin(indigo.PluginBase):
 
     def shutdown(self):
         self._stop_auth.set()
-        self._stop_coordinator()
+        with self._coord_lock:
+            self._stop_coordinator()
         self.logger.info("Home Connect plugin stopped")
 
     def runConcurrentThread(self):
@@ -68,30 +73,55 @@ class Plugin(indigo.PluginBase):
 
     # -- SSE coordinator -----------------------------------------------------
     def _reconcile_coordinator(self):
-        """Start the coordinator when authorized, stop it when not."""
-        authorized = bool(self._auth and self._auth.is_authorized())
-        if authorized and self._coordinator is None:
-            self._start_coordinator()
-        elif not authorized and self._coordinator is not None:
-            self._stop_coordinator()
+        """Bring the coordinator in line with auth + the current client.
+
+        Runs the stream only while fully authorized (a lost/invalid grant leaves
+        the store entry in place but flips state to AUTH_REQUIRED, so we key off
+        ``state()``, not ``is_authorized()``). If a coordinator is running but
+        wired to a superseded api/auth (prefs changed), it is restarted against
+        the current one — never leaving two streams live.
+        """
+        with self._coord_lock:
+            authorized = bool(self._auth) and self._auth.state() == STATE_AUTHORIZED
+            if not authorized:
+                self._stop_coordinator()
+                return
+            if self._coordinator is not None and self._coordinator_api is not self._api:
+                if not self._stop_coordinator():
+                    return                # old one still winding down; retry next cycle
+            if self._coordinator is None:
+                self._start_coordinator()
 
     def _start_coordinator(self):
         # Device creation is Phase 3; for now the coordinator logs each newly
-        # discovered appliance at info on first sight (see hc_events).
-        self._coordinator = HomeConnectCoordinator(self._api, logger=self.logger)
+        # discovered appliance at info on first sight (see hc_events). Capture
+        # this api/auth so a later prefs change can detect the stale wiring.
+        api, auth = self._api, self._auth
+        coordinator = HomeConnectCoordinator(
+            api, logger=self.logger,
+            auth_ok=lambda: auth.state() == STATE_AUTHORIZED)
         try:
-            self._coordinator.start()
+            if coordinator.start():
+                self._coordinator = coordinator
+                self._coordinator_api = api
         except Exception as exc:  # pylint: disable=broad-except
             self.logger.exception(exc)
-            self._coordinator = None
 
     def _stop_coordinator(self):
-        if self._coordinator is not None:
-            try:
-                self._coordinator.stop()
-            except Exception as exc:  # pylint: disable=broad-except
-                self.logger.exception(exc)
+        """Stop the coordinator; return True only if it fully stopped. On a
+        stuck reader thread it stays referenced so we never abandon a live
+        stream (and never start a second one on top)."""
+        if self._coordinator is None:
+            return True
+        try:
+            stopped = self._coordinator.stop()
+        except Exception as exc:  # pylint: disable=broad-except
+            self.logger.exception(exc)
+            stopped = False
+        if stopped:
             self._coordinator = None
+            self._coordinator_api = None
+        return stopped
 
     # -- Client construction -------------------------------------------------
     def _token_path(self):
@@ -114,12 +144,13 @@ class Plugin(indigo.PluginBase):
         client_id = self.pluginPrefs.get("clientId", "").strip()
         client_secret = self.pluginPrefs.get("clientSecret", "").strip()
         simulator = self.pluginPrefs.get("useSimulator", False)
-        if self._auth is not None:
-            self._auth.mark_stale()       # a late worker from the old instance must not persist
-        # Tear down any running stream; it is bound to the old api/host. The
-        # supervisor (or startup) restarts it against the rebuilt client.
-        self._stop_coordinator()
-        self._api, self._auth = self._build_client(client_id, client_secret, simulator)
+        with self._coord_lock:
+            if self._auth is not None:
+                self._auth.mark_stale()   # a late worker from the old instance must not persist
+            # Tear down any running stream; it is bound to the old api/host. The
+            # supervisor (or startup) restarts it against the rebuilt client.
+            self._stop_coordinator()
+            self._api, self._auth = self._build_client(client_id, client_secret, simulator)
 
     # -- Config UI -----------------------------------------------------------
     def getPrefsUiValues(self, *args, **kwargs):  # pylint: disable=unused-argument
