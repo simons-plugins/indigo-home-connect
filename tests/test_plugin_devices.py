@@ -77,6 +77,73 @@ def test_device_stop_detaches():
     assert len(dev.batches) == batches_before      # detached: no more writes
 
 
+# -- orphaned haId escalation (item 5) ----------------------------------------
+
+def test_orphaned_haid_escalates_after_discovery():
+    p = _plugin()
+    p._coordinator = _FakeCoord([_appliance("HA-OTHER", "Oven", "Oven")])
+    dev = _device(11, "dishwasher", "HA-MISSING")
+    p.deviceStartComm(dev)
+    assert dev.states["status"] == "Waiting"
+    # A full discovery pass completes and HA-MISSING was not among the appliances.
+    p._discovery_complete({"HA-OTHER"})
+    assert dev.error_state == "appliance not found on Home Connect account"
+    assert dev.states["status"] == "Not found"
+
+
+def test_orphaned_then_appears_attaches_and_clears():
+    p = _plugin()
+    p._coordinator = _FakeCoord([])
+    dev = _device(12, "dishwasher", "HA-LATE")
+    p.deviceStartComm(dev)
+    p._discovery_complete(set())                      # orphaned
+    assert dev.error_state == "appliance not found on Home Connect account"
+    appliance = _appliance("HA-LATE", "Dishwasher", "Dishwasher")
+    p._appliance_discovered(appliance)                # shows up later
+    assert dev.error_state is None                    # cleared on attach
+    appliance.merge_items([{"key": OP, "value": "BSH.Common.EnumType.OperationState.Ready"}])
+    assert dev.states["operationState"] == "Ready"
+
+
+def test_discovery_complete_does_not_touch_attached_devices():
+    p = _plugin()
+    appliance = _appliance("HA-1", "Dishwasher", "Dishwasher")
+    p._coordinator = _FakeCoord([appliance])
+    dev = _device(13, "dishwasher", "HA-1")
+    p.deviceStartComm(dev)                            # attached
+    p._discovery_complete({"HA-1"})
+    assert dev.error_state is None                    # attached device untouched
+
+
+# -- reconfigure to a different haId (item 7) ---------------------------------
+
+def test_reconfigure_to_different_haid():
+    p = _plugin()
+    old_app = _appliance("HA-OLD", "Dishwasher", "Dishwasher")
+    new_app = _appliance("HA-NEW", "Dishwasher", "Dishwasher")
+    p._coordinator = _FakeCoord([old_app, new_app])
+    dev = _device(14, "dishwasher", "HA-OLD")
+    p.deviceStartComm(dev)
+    old_app.handle_event_items([{"key": "BSH.Common.Event.ProgramFinished", "timestamp": 1,
+                                 "value": "BSH.Common.EnumType.EventPresentState.Present"}])
+    assert dev.states["lastEvent"] == "ProgramFinished"
+
+    # Indigo restarts comm with the new haId (didDeviceCommPropertyChange True):
+    p.deviceStopComm(dev)
+    dev.pluginProps["haId"] = "HA-NEW"
+    p.deviceStartComm(dev)
+
+    # Carried per-appliance state (lastEvent) cleared on attach to the new one.
+    assert dev.states["lastEvent"] == ""
+    # Old appliance's merges no longer write to the device.
+    batches_before = len(dev.batches)
+    old_app.merge_items([{"key": OP, "value": "BSH.Common.EnumType.OperationState.Run"}])
+    assert len(dev.batches) == batches_before
+    # New appliance drives the device.
+    new_app.merge_items([{"key": OP, "value": "BSH.Common.EnumType.OperationState.Ready"}])
+    assert dev.states["operationState"] == "Ready"
+
+
 # -- getDeviceStateList / display state ---------------------------------------
 
 def test_get_device_state_list_appends_dynamic_states():

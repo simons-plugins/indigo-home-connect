@@ -125,6 +125,26 @@ def test_device_flow_expired_token_restarts(tmp_path):
     assert len(device_auth_posts) == 2     # restarted once
 
 
+def test_run_device_flow_starts_fresh_when_stashed_code_expired(tmp_path):
+    """A stashed device code past its expiry must be abandoned: run_device_flow
+    starts a fresh flow, calls on_prompt with the new code, and polls THAT one."""
+    api = FakeAPI()
+    api.queue_post(DEVICE_AUTH).queue_post(token_response())
+    auth = make_auth(api, tmp_path)          # now() == 1000.0
+    # Pre-stash an already-expired device code (expires_at in the past).
+    auth._device = {"device_code": "OLD-EXPIRED", "expires_at": 500.0}  # pylint: disable=protected-access
+
+    prompts = []
+    status, _ = auth.run_device_flow(on_prompt=prompts.append)
+
+    assert status == "success"
+    assert len(prompts) == 1 and prompts[0]["user_code"] == "ABCD-1234"
+    device_auth_posts = [c for c in api.post_calls if c["path"].endswith("device_authorization")]
+    assert len(device_auth_posts) == 1       # one fresh flow started
+    token_posts = [c for c in api.post_calls if c["path"].endswith("token")]
+    assert token_posts[0]["form"]["device_code"] == "DEV-CODE-XYZ"   # the NEW code
+
+
 def test_device_flow_grant_type_urn_fallback(tmp_path):
     api = FakeAPI()
     (api.queue_post(DEVICE_AUTH)
