@@ -5,8 +5,9 @@ Surfaces Home Connect appliances as Indigo devices via the cloud API
 control over REST.
 
 Phase 1 — OAuth (Device Flow + simulator), token store, request/rate-limit
-client. All Indigo-touching code lives here; the ``hc_*`` modules are pure
-stdlib and never import ``indigo``.
+client. Phase 2 — the SSE event stream + per-appliance state engine, owned by
+:class:`~hc_events.HomeConnectCoordinator`. All Indigo-touching code lives here;
+the ``hc_*`` modules are pure stdlib and never import ``indigo``.
 """
 import os
 import threading
@@ -16,6 +17,7 @@ import indigo
 from hc_api import HomeConnectAPI, HomeConnectError, PROD_HOST, SIMULATOR_HOST, redact
 from hc_auth import (HomeConnectAuth, STATE_AUTHORIZED, STATE_PENDING,
                      STATE_AUTH_REQUIRED, STATE_UNAUTHORIZED)
+from hc_events import HomeConnectCoordinator
 
 TOKEN_FILENAME = "com.simons-plugins.homeconnect.tokens.json"
 
@@ -37,14 +39,17 @@ class Plugin(indigo.PluginBase):
         self._auth = None
         self._auth_thread = None
         self._stop_auth = threading.Event()
+        self._coordinator = None
 
     # -- Lifecycle -----------------------------------------------------------
     def startup(self):
         self.logger.info("Home Connect plugin starting")
         self._rebuild_client()
+        self._reconcile_coordinator()
 
     def shutdown(self):
         self._stop_auth.set()
+        self._stop_coordinator()
         self.logger.info("Home Connect plugin stopped")
 
     def runConcurrentThread(self):
@@ -55,9 +60,38 @@ class Plugin(indigo.PluginBase):
                         self._auth.refresh_if_needed()
                     except Exception as exc:  # pylint: disable=broad-except
                         self.logger.exception(exc)
+                # Bring the event stream up once authorized (or down if not).
+                self._reconcile_coordinator()
                 self.sleep(60)
         except self.StopThread:
             pass
+
+    # -- SSE coordinator -----------------------------------------------------
+    def _reconcile_coordinator(self):
+        """Start the coordinator when authorized, stop it when not."""
+        authorized = bool(self._auth and self._auth.is_authorized())
+        if authorized and self._coordinator is None:
+            self._start_coordinator()
+        elif not authorized and self._coordinator is not None:
+            self._stop_coordinator()
+
+    def _start_coordinator(self):
+        # Device creation is Phase 3; for now the coordinator logs each newly
+        # discovered appliance at info on first sight (see hc_events).
+        self._coordinator = HomeConnectCoordinator(self._api, logger=self.logger)
+        try:
+            self._coordinator.start()
+        except Exception as exc:  # pylint: disable=broad-except
+            self.logger.exception(exc)
+            self._coordinator = None
+
+    def _stop_coordinator(self):
+        if self._coordinator is not None:
+            try:
+                self._coordinator.stop()
+            except Exception as exc:  # pylint: disable=broad-except
+                self.logger.exception(exc)
+            self._coordinator = None
 
     # -- Client construction -------------------------------------------------
     def _token_path(self):
@@ -82,6 +116,9 @@ class Plugin(indigo.PluginBase):
         simulator = self.pluginPrefs.get("useSimulator", False)
         if self._auth is not None:
             self._auth.mark_stale()       # a late worker from the old instance must not persist
+        # Tear down any running stream; it is bound to the old api/host. The
+        # supervisor (or startup) restarts it against the rebuilt client.
+        self._stop_coordinator()
         self._api, self._auth = self._build_client(client_id, client_secret, simulator)
 
     # -- Config UI -----------------------------------------------------------
@@ -156,3 +193,4 @@ class Plugin(indigo.PluginBase):
             return
         self.debug = valuesDict.get("showDebugInfo", False)
         self._rebuild_client()
+        self._reconcile_coordinator()
