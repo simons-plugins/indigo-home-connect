@@ -107,6 +107,7 @@ class Plugin(indigo.PluginBase):
         api, auth = self._api, self._auth
         coordinator = HomeConnectCoordinator(
             api, logger=self.logger, on_appliance=self._appliance_discovered,
+            on_discovery=self._discovery_complete,
             supports_programs_for=_supports_programs_for,
             auth_ok=lambda: auth.state() == STATE_AUTHORIZED)
         try:
@@ -243,7 +244,7 @@ class Plugin(indigo.PluginBase):
         up later (the coordinator's PAIRED/discovery hook attaches it via
         :meth:`_appliance_discovered`)."""
         haid = (dev.pluginProps or {}).get("haId")
-        treat_off = _as_bool(dev.pluginProps.get("offWhenDisconnected", True))
+        treat_off = hc.to_bool(dev.pluginProps.get("offWhenDisconnected", True))
         bridge = ApplianceBridge(dev, dev.deviceTypeId, logger=self.logger,
                                  treat_disconnected_as_off=treat_off)
         with self._dev_lock:
@@ -274,6 +275,16 @@ class Plugin(indigo.PluginBase):
             bridges = [b for b in self._bridges.values() if b.haid == appliance.haid]
         for bridge in bridges:
             bridge.attach(appliance)
+
+    def _discovery_complete(self, known_haids):
+        """After a full discovery pass, escalate any device whose configured haId
+        was not among the discovered appliances (orphaned haId). Costs no extra
+        API requests — it reads the set discovery already produced."""
+        with self._dev_lock:
+            bridges = list(self._bridges.values())
+        for bridge in bridges:
+            if not bridge.is_attached and bridge.haid and bridge.haid not in known_haids:
+                bridge.mark_orphaned()
 
     def _find_appliance(self, haid):
         if not haid:
@@ -368,14 +379,6 @@ class Plugin(indigo.PluginBase):
             self.logger.info("  %s [%s] haId=%s connected=%s",
                              appliance.name, appliance.type or "?",
                              redact(appliance.haid), appliance.connected)
-
-
-def _as_bool(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in ("true", "on", "yes", "1")
-    return bool(value)
 
 
 def _supports_programs_for(info):

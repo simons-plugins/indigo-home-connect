@@ -376,7 +376,7 @@ class HomeConnectCoordinator:
     """Owns the event stream, the appliance registry and the worker thread."""
 
     def __init__(self, api, logger=None, monotonic=time.monotonic,
-                 on_appliance=None, on_event=None, supports_programs=True,
+                 on_appliance=None, on_event=None, on_discovery=None, supports_programs=True,
                  supports_programs_for=None, discovery_interval=DISCOVERY_INTERVAL,
                  stream=None, scheduler=None, auth_ok=None):
         self._api = api
@@ -384,6 +384,10 @@ class HomeConnectCoordinator:
         self._monotonic = monotonic
         self._on_appliance = on_appliance     # Phase 3 hook: called once per new appliance
         self._on_event = on_event             # tap for every routed event (tools/tests)
+        # Called after each completed discovery pass with the set of known haIds,
+        # so the plugin can escalate a device whose configured haId never appears
+        # (orphaned haId) without issuing any extra API requests.
+        self._on_discovery = on_discovery
         # ``supports_programs_for(info) -> bool`` resolves the per-appliance flag
         # from its HC type (plugin wires hc_constants). Settings-only appliances
         # (fridge/freezer) then skip the selected/active-program re-reads that
@@ -465,6 +469,11 @@ class HomeConnectCoordinator:
         if found is not None:
             for info in found:
                 self._ensure_appliance(info)
+            if self._on_discovery:
+                try:
+                    self._on_discovery({a.haid for a in self.appliances()})
+                except Exception as exc:  # pylint: disable=broad-except
+                    self._logger.exception(exc)
         if not self._stop.is_set():
             self._scheduler.post(self._discover, self._discovery_interval)
 
