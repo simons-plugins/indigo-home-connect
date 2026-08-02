@@ -157,13 +157,19 @@ def main():
             reached = wait_for(lambda: op_tail(dishwasher) in ("Run", "DelayedStart"), STATE_TIMEOUT)
             report("verify OperationState -> Run", bool(reached),
                    f"now {op_tail(dishwasher) or 'unknown'}")
-            try_step("pause program", lambda: controller.pause_program(dishwasher))
-            wait_for(lambda: op_tail(dishwasher) == "Pause", 10)
-            try_step("resume program", lambda: controller.resume_program(dishwasher))
-            wait_for(lambda: op_tail(dishwasher) == "Run", 10)
+            if try_step("pause program", lambda: controller.pause_program(dishwasher)):
+                paused = wait_for(lambda: op_tail(dishwasher) == "Pause", 10)
+                report("verify OperationState -> Pause", bool(paused),
+                       f"now {op_tail(dishwasher) or 'unknown'}")
+            if try_step("resume program", lambda: controller.resume_program(dishwasher)):
+                resumed = wait_for(lambda: op_tail(dishwasher) == "Run", 10)
+                report("verify OperationState -> Run", bool(resumed),
+                       f"now {op_tail(dishwasher) or 'unknown'}")
 
-        try_step("stop program", lambda: controller.stop_program(dishwasher))
-        wait_for(lambda: op_tail(dishwasher) in ("Ready", "Finished", "Aborting"), 10)
+        if try_step("stop program", lambda: controller.stop_program(dishwasher)):
+            stopped = wait_for(lambda: op_tail(dishwasher) in ("Ready", "Finished", "Aborting"), 10)
+            report("verify OperationState -> stopped", bool(stopped),
+                   f"now {op_tail(dishwasher) or 'unknown'}")
         print(f"\nFinal operation state: {op_tail(dishwasher) or 'unknown'}")
     finally:
         coordinator.stop()
