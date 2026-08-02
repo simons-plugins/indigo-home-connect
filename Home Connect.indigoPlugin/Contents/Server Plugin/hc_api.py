@@ -22,6 +22,12 @@ PROD_HOST = "api.home-connect.com"
 SIMULATOR_HOST = "simulator.home-connect.com"
 HC_CONTENT_TYPE = "application/vnd.bsh.sdk.v1+json"
 FORM_CONTENT_TYPE = "application/x-www-form-urlencoded"
+SSE_CONTENT_TYPE = "text/event-stream"
+
+# SSE read timeout must be > the 55 s keep-alive so a silent stream is caught as
+# dead (PRD §3.1). Each socket read blocks up to this long before raising.
+STREAM_READ_TIMEOUT = 120
+_STREAM_CHUNK = 8192
 
 # Never retry these status codes (see PRD §3 / homebridge-homeconnect).
 NO_RETRY_STATUS = frozenset({400, 403, 404, 405, 406, 409, 415})
@@ -85,6 +91,50 @@ class RawResponse:
 
     def text(self):
         return self.body.decode("utf-8", "replace") if self.body else ""
+
+
+class StreamResponse:
+    """A live server-sent-events response.
+
+    Owns the open connection; iterate :meth:`lines` to get decoded text lines
+    (newlines stripped) as the server produces them. Each read blocks up to the
+    socket timeout, so a silent stream surfaces as a :class:`HomeConnectError`.
+    Safe to :meth:`close` from another thread to unblock a stuck reader.
+    """
+
+    def __init__(self, conn, resp, path, logger):
+        self._conn = conn
+        self._resp = resp
+        self._path = path
+        self._logger = logger
+        self._closed = False
+
+    def lines(self):
+        buf = ""
+        try:
+            while True:
+                chunk = self._resp.read(_STREAM_CHUNK)
+                if not chunk:
+                    break                      # server closed the stream
+                buf += chunk.decode("utf-8", "replace")
+                parts = buf.split("\n")
+                buf = parts.pop()              # keep any trailing partial line
+                for line in parts:
+                    yield line.rstrip("\r")
+        except (OSError, http.client.HTTPException) as exc:
+            raise HomeConnectError(
+                f"event stream read failed on {redact_path(self._path)}: {exc}") from exc
+        finally:
+            self.close()
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._conn.close()
+        except Exception:  # pylint: disable=broad-except
+            pass
 
 
 def _default_connection_factory(host, timeout):
@@ -188,6 +238,58 @@ class HomeConnectAPI:
                 attempt += 1
                 continue
             raise err
+
+    # -- Streaming (SSE) -----------------------------------------------------
+    def open_stream(self, path, *, accept=SSE_CONTENT_TYPE, read_timeout=STREAM_READ_TIMEOUT,
+                    authorize=True):
+        """Open a long-lived streaming GET and return a :class:`StreamResponse`.
+
+        Goes through the shared request gate (so a 429 ``Retry-After`` from a
+        failed open pushes the gate for *all* requests) and counts one request
+        against the daily budget. Non-2xx responses raise a :class:`HomeConnectError`;
+        the caller (``hc_events``) runs the reconnect loop.
+        """
+        self._wait_for_gate()
+        conn = self._connection_factory(self._host, read_timeout)
+        req_headers = {"Accept": accept, "User-Agent": self._user_agent, "Cache-Control": "no-cache"}
+        if authorize and self._token_provider:
+            token = self._token_provider()
+            self._last_used_token = token
+            if token:
+                req_headers["Authorization"] = f"Bearer {token}"
+        else:
+            self._last_used_token = None
+
+        self._count_request()
+        try:
+            conn.request("GET", path, headers=req_headers)
+            resp = conn.getresponse()
+        except (OSError, http.client.HTTPException) as exc:
+            self._safe_close(conn)
+            raise HomeConnectError(
+                f"transport error opening stream {redact_path(path)}: {exc}") from exc
+
+        if 200 <= resp.status < 300:
+            return StreamResponse(conn, resp, path, self._logger)
+
+        # Failed to open: drain a small error body, honor Retry-After, then raise.
+        headers = {k.lower(): v for k, v in resp.getheaders()}
+        try:
+            body = resp.read()
+        except (OSError, http.client.HTTPException):
+            body = b""
+        self._safe_close(conn)
+        raw = RawResponse(resp.status, headers, body)
+        if resp.status == 429:
+            self._apply_retry_after(raw)
+        raise self._build_error(raw, "GET", path)
+
+    @staticmethod
+    def _safe_close(conn):
+        try:
+            conn.close()
+        except Exception:  # pylint: disable=broad-except
+            pass
 
     # -- Internals -----------------------------------------------------------
     def _perform(self, method, path, headers, body, accept, authorize):
