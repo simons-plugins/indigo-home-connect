@@ -130,7 +130,7 @@ def spec_for(device_type_id, bsh_key):
 
 
 def common_state_ids():
-    """The 15 common state IDs present in every type's Devices.xml block."""
+    """The common state IDs present in every type's Devices.xml block."""
     ids = [state_id for state_id, _ in COMMON_MAP.values()]
     ids.extend(DERIVED_STATE_IDS)
     return ids

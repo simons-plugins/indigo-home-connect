@@ -87,6 +87,19 @@ def state_xml(state_id, value_type, label):
     )
 
 
+# Long ConfigUI copy kept out of the template so source lines stay <=120 chars;
+# adjacent string literals concatenate with no newline, so output is unchanged.
+APPLIANCE_HELP = (
+    "Only appliances discovered on your Home Connect account are listed. "
+    "Authorize the plugin and wait a moment for discovery if the list is empty. "
+    'Appliances already assigned to another device are marked "(in use)".'
+)
+POLICY_DESC = (
+    'Some appliances report "off" as disconnected. Leave on to show Off; '
+    "turn off to flag a device error when it disconnects."
+)
+
+
 def device_xml(type_id):
     states = "".join(state_xml(*s) for s in COMMON)
     states += "".join(state_xml(*s) for s in TYPE_SPECIFIC[type_id])
@@ -99,11 +112,11 @@ def device_xml(type_id):
 \t\t\t\t<List class="self" method="listAppliances" dynamicReload="true"/>
 \t\t\t</Field>
 \t\t\t<Field id="applianceHelp" type="label" fontSize="small" alignWithControl="true">
-\t\t\t\t<Label>Only appliances discovered on your Home Connect account are listed. Authorize the plugin and wait a moment for discovery if the list is empty. Appliances already assigned to another device are marked "(in use)".</Label>
+\t\t\t\t<Label>{APPLIANCE_HELP}</Label>
 \t\t\t</Field>
 \t\t\t<Field id="offWhenDisconnected" type="checkbox" defaultValue="true">
 \t\t\t\t<Label>Treat "disconnected" as Off:</Label>
-\t\t\t\t<Description>Some appliances report "off" as disconnected. Leave on to show Off; turn off to flag a device error when it disconnects.</Description>
+\t\t\t\t<Description>{POLICY_DESC}</Description>
 \t\t\t</Field>
 \t\t</ConfigUI>
 \t\t<States>
