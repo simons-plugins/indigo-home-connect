@@ -1,7 +1,54 @@
 <?xml version="1.0"?>
-<!-- Phase 1 adds: client ID field, Authorize button (OAuth Device Flow),
-     simulator toggle. -->
 <PluginConfig>
+	<SupportURL>https://github.com/simons-plugins/indigo-home-connect</SupportURL>
+
+	<Field id="introLabel" type="label" fontSize="small">
+		<Label>Register a developer application at developer.home-connect.com (OAuth Flow = Device Flow, Redirect off), then paste its Client ID below. After creating the application, wait 15 min–1 h for it to propagate before authorizing. Use a dedicated Client ID — the rate limits are per client + account.</Label>
+	</Field>
+
+	<Field id="clientId" type="textfield">
+		<Label>Client ID:</Label>
+	</Field>
+
+	<Field id="clientSecret" type="textfield" secure="true">
+		<Label>Client Secret (optional):</Label>
+	</Field>
+
+	<Field id="clientSecretLabel" type="label" fontSize="small" alignWithControl="true">
+		<Label>Only needed if your application defines one. Note: Indigo's secure field masks the value on screen but does not store it encrypted.</Label>
+	</Field>
+
+	<Field id="useSimulator" type="checkbox" defaultValue="false">
+		<Label>Use the Home Connect simulator:</Label>
+		<Description>Developer testing only (auto-approved, no browser step)</Description>
+	</Field>
+
+	<Field id="authSeparator" type="separator"/>
+
+	<Field id="authButton" type="button">
+		<Label>Authorize this plugin:</Label>
+		<Title>Authorize</Title>
+		<CallbackMethod>authorizeButtonPressed</CallbackMethod>
+	</Field>
+
+	<Field id="authInstructions" type="textfield" readonly="true">
+		<Label>Verification URL:</Label>
+	</Field>
+
+	<Field id="authUserCode" type="textfield" readonly="true">
+		<Label>User code:</Label>
+	</Field>
+
+	<Field id="authInstructionsHelp" type="label" fontSize="small" alignWithControl="true">
+		<Label>Open the verification URL in a browser and confirm with the SingleKey ID email that owns your appliances. The link and code are also written to the Event Log. This dialog can be closed while authorization completes in the background.</Label>
+	</Field>
+
+	<Field id="authStatus" type="textfield" readonly="true">
+		<Label>Status:</Label>
+	</Field>
+
+	<Field id="debugSeparator" type="separator"/>
+
 	<Field id="showDebugInfo" type="checkbox" defaultValue="false">
 		<Label>Enable debug logging:</Label>
 	</Field>
