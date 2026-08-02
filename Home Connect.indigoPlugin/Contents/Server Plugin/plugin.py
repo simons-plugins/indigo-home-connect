@@ -80,6 +80,8 @@ class Plugin(indigo.PluginBase):
         client_id = self.pluginPrefs.get("clientId", "").strip()
         client_secret = self.pluginPrefs.get("clientSecret", "").strip()
         simulator = self.pluginPrefs.get("useSimulator", False)
+        if self._auth is not None:
+            self._auth.mark_stale()       # a late worker from the old instance must not persist
         self._api, self._auth = self._build_client(client_id, client_secret, simulator)
 
     # -- Config UI -----------------------------------------------------------
@@ -104,6 +106,8 @@ class Plugin(indigo.PluginBase):
         # Stop any in-flight authorization before starting a new one.
         self._stop_auth.set()
         self._stop_auth = threading.Event()
+        if self._auth is not None:
+            self._auth.mark_stale()       # old worker must not persist a superseded result
 
         api, auth = self._build_client(client_id, client_secret, simulator)
         self._api, self._auth = api, auth

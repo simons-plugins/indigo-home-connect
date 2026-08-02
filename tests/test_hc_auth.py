@@ -1,11 +1,13 @@
 """Unit tests for hc_auth.py — Device Flow, simulator, refresh, persistence."""
 import json
 import os
+import threading
 from unittest.mock import Mock
 
 import pytest
 
-from hc_auth import (HomeConnectAuth, STATE_AUTHORIZED, STATE_AUTH_REQUIRED,
+import hc_auth
+from hc_auth import (HomeConnectAuth, TokenStore, STATE_AUTHORIZED, STATE_AUTH_REQUIRED,
                      STATE_PENDING, STATE_UNAUTHORIZED, SCOPES)
 from support import FakeAPI, FakeRaw, oauth_error
 
@@ -196,8 +198,10 @@ def test_refresh_respects_min_interval(tmp_path):
     auth = make_auth(api, tmp_path)
     _seed_token(auth, api)
     # Force the token past its refresh window but mark a very recent attempt.
+    entry = auth._store.get(CLIENT_A)                        # pylint: disable=protected-access
+    entry["expires_at"] = 1_000.0
+    auth._store.set(CLIENT_A, entry)                         # pylint: disable=protected-access
     auth._last_refresh_attempt = 1_000.0                     # pylint: disable=protected-access
-    auth._tokens[CLIENT_A]["expires_at"] = 1_000.0           # pylint: disable=protected-access
     assert auth.refresh_if_needed(force=False) is False
     assert not any(c["form"].get("grant_type") == "refresh_token" for c in api.post_calls)
 
@@ -250,3 +254,81 @@ def test_token_file_permissions_0600(tmp_path):
     _seed_token(auth, api)
     mode = os.stat(auth._token_path).st_mode & 0o777   # pylint: disable=protected-access
     assert mode == 0o600
+
+
+# -- Concurrency / crash-safety regressions (Phase 1 review) ------------------
+
+def test_atomic_save_does_not_corrupt_file_on_replace_failure(tmp_path, monkeypatch):
+    path = os.path.join(str(tmp_path), "tokens.json")
+    store = TokenStore(path, logger=Mock())
+    store.set(CLIENT_A, {"access_token": "A1", "refresh_token": "R1", "expires_at": 1.0})
+    with open(path, encoding="utf-8") as handle:
+        assert json.load(handle)[CLIENT_A]["access_token"] == "A1"
+
+    # os.replace fails mid-write: the real file must survive intact, no .tmp litter.
+    def boom(_src, _dst):
+        raise OSError("simulated crash during replace")
+
+    monkeypatch.setattr(hc_auth.os, "replace", boom)
+    store.set(CLIENT_B, {"access_token": "B1", "refresh_token": "R2", "expires_at": 1.0})  # no raise
+
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    assert data[CLIENT_A]["access_token"] == "A1"       # original untouched / valid
+    assert CLIENT_B not in data                          # failed write not persisted
+    leftovers = [f for f in os.listdir(str(tmp_path)) if f.endswith(".tmp")]
+    assert leftovers == []                               # temp file cleaned up
+
+
+def test_late_save_from_stale_instance_does_not_clobber(tmp_path):
+    token_file = os.path.join(str(tmp_path), "tokens.json")
+
+    # Instance 2 authorizes (the live one).
+    api2 = FakeAPI()
+    auth2 = HomeConnectAuth(api2, token_file, CLIENT_A, "s", logger=Mock(), now=lambda: 1.0)
+    _seed_token(auth2, api2, access="NEW-ACCESS", refresh="NEW-REFRESH")
+
+    # Instance 1 is superseded, then its in-flight device flow completes late.
+    api1 = FakeAPI()
+    auth1 = HomeConnectAuth(api1, token_file, CLIENT_A, "s", logger=Mock(), now=lambda: 1.0)
+    auth1.mark_stale()
+    api1.queue_post(DEVICE_AUTH).queue_post(token_response(access="STALE-ACCESS"))
+    auth1.start_device_flow()
+    status, _ = auth1.poll_device_flow()
+
+    assert status == "cancelled"                         # stale instance refused to save
+    assert auth2.authorization_header() == "NEW-ACCESS"  # live token survives
+    with open(token_file, encoding="utf-8") as handle:
+        assert json.load(handle)[CLIENT_A]["access_token"] == "NEW-ACCESS"
+
+
+def test_concurrent_refresh_submits_exactly_once(tmp_path):
+    api = FakeAPI()
+    auth = make_auth(api, tmp_path)
+    _seed_token(auth, api, access="A1", refresh="R1")
+    # Only ONE refresh response is queued: if both threads submitted, the second
+    # would pop an empty deque and raise.
+    api.queue_post(token_response(access="A2", refresh="R2"))
+
+    barrier = threading.Barrier(2)
+    results = []
+    errors = []
+
+    def worker():
+        try:
+            barrier.wait()
+            results.append(auth.refresh_if_needed(force=True))
+        except Exception as exc:  # pylint: disable=broad-except
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert errors == []
+    refresh_posts = [c for c in api.post_calls if c["form"].get("grant_type") == "refresh_token"]
+    assert len(refresh_posts) == 1                        # single-use token submitted once
+    assert all(results)                                  # both callers see a fresh token
+    assert auth.authorization_header() == "A2"
