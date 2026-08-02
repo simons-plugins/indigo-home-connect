@@ -64,8 +64,9 @@ _FIELD_RE = re.compile(r"^(\w+):[ ]?(.*)$")
 # Errors from a state read that mean "feature absent", not a failure (PRD §3.4).
 # ``UnsupportedOperation`` is returned by settings-only appliances (fridge,
 # freezer, wine cooler) for the program endpoints — observed live on the
-# simulator's FridgeFreezer. Swallowing it stops a retry storm on those types
-# until Phase 3 sets ``supports_programs=False`` per appliance type.
+# simulator's FridgeFreezer. The coordinator now skips program re-reads for those
+# types entirely (``supports_programs_for``), so this is belt-and-braces for any
+# appliance that still rejects a program endpoint.
 _ABSENT_KEYS = frozenset({
     "SDK.Error.NoProgramSelected",
     "SDK.Error.NoProgramActive",
@@ -375,15 +376,25 @@ class HomeConnectCoordinator:
     """Owns the event stream, the appliance registry and the worker thread."""
 
     def __init__(self, api, logger=None, monotonic=time.monotonic,
-                 on_appliance=None, on_event=None, supports_programs=True,
-                 discovery_interval=DISCOVERY_INTERVAL, stream=None, scheduler=None,
-                 auth_ok=None):
+                 on_appliance=None, on_event=None, on_discovery=None, supports_programs=True,
+                 supports_programs_for=None, discovery_interval=DISCOVERY_INTERVAL,
+                 stream=None, scheduler=None, auth_ok=None):
         self._api = api
         self._logger = logger or logging.getLogger("hc_events")
         self._monotonic = monotonic
         self._on_appliance = on_appliance     # Phase 3 hook: called once per new appliance
         self._on_event = on_event             # tap for every routed event (tools/tests)
+        # Called after each completed discovery pass with the set of known haIds,
+        # so the plugin can escalate a device whose configured haId never appears
+        # (orphaned haId) without issuing any extra API requests.
+        self._on_discovery = on_discovery
+        # ``supports_programs_for(info) -> bool`` resolves the per-appliance flag
+        # from its HC type (plugin wires hc_constants). Settings-only appliances
+        # (fridge/freezer) then skip the selected/active-program re-reads that
+        # would otherwise burn 2 requests/reconnect against the 1000/day budget
+        # (PRD §3.2). Falls back to the coordinator-wide ``supports_programs``.
         self._supports_programs = supports_programs
+        self._supports_programs_for = supports_programs_for
         self._discovery_interval = discovery_interval
 
         self._reader = ApiReader(api)
@@ -458,6 +469,11 @@ class HomeConnectCoordinator:
         if found is not None:
             for info in found:
                 self._ensure_appliance(info)
+            if self._on_discovery:
+                try:
+                    self._on_discovery({a.haid for a in self.appliances()})
+                except Exception as exc:  # pylint: disable=broad-except
+                    self._logger.exception(exc)
         if not self._stop.is_set():
             self._scheduler.post(self._discover, self._discovery_interval)
 
@@ -469,9 +485,12 @@ class HomeConnectCoordinator:
             appliance = self._appliances.get(haid)
             is_new = appliance is None
             if is_new:
+                supports = self._supports_programs
+                if self._supports_programs_for is not None:
+                    supports = self._supports_programs_for(info)
                 appliance = HomeConnectAppliance(
                     haid, info, self._reader, self._scheduler.post, logger=self._logger,
-                    monotonic=self._monotonic, supports_programs=self._supports_programs)
+                    monotonic=self._monotonic, supports_programs=supports)
                 self._appliances[haid] = appliance
         if is_new:
             self._logger.info("Discovered Home Connect appliance %s [%s] haId=%s",

@@ -1,0 +1,149 @@
+"""Generate Devices.xml for the seven Home Connect device types.
+
+The common states block is intentionally duplicated per type (PRD §4: "changes
+rarely, duplication accepted"). Generated so the 7 blocks stay identical.
+"""
+import os
+
+SUPPORT_URL = "https://github.com/simons-plugins/indigo-home-connect"
+
+# (state_id, value_type, label)
+COMMON = [
+    ("connected", "Boolean", "Connected"),
+    ("operationState", "String", "Operation State"),
+    ("powerState", "String", "Power State"),
+    ("doorState", "String", "Door State"),
+    ("programActive", "String", "Active Program"),
+    ("programSelected", "String", "Selected Program"),
+    ("programProgress", "Integer", "Program Progress (%)"),
+    ("remainingTime", "Integer", "Remaining Time (seconds)"),
+    ("remainingTimeFormatted", "String", "Remaining Time"),
+    ("remoteControlActive", "Boolean", "Remote Control Active"),
+    ("remoteStartAllowed", "Boolean", "Remote Start Allowed"),
+    ("localControlActive", "Boolean", "Local Control Active"),
+    ("lastEvent", "String", "Last Event"),
+    ("lastEventTime", "String", "Last Event Time"),
+    ("status", "String", "Status"),
+]
+
+TYPE_SPECIFIC = {
+    "dishwasher": [
+        ("saltNearlyEmpty", "Boolean", "Salt Nearly Empty"),
+        ("rinseAidNearlyEmpty", "Boolean", "Rinse Aid Nearly Empty"),
+    ],
+    "dryer": [
+        ("dryingTarget", "String", "Drying Target"),
+    ],
+    "washer": [
+        ("spinSpeed", "String", "Spin Speed"),
+        ("temperature", "String", "Temperature"),
+    ],
+    "oven": [
+        ("setpointTemperature", "Number", "Setpoint Temperature"),
+        ("currentCavityTemperature", "Number", "Current Cavity Temperature"),
+        ("preheatFinished", "Boolean", "Preheat Finished"),
+    ],
+    "coffeeMaker": [
+        ("beanContainerEmpty", "Boolean", "Bean Container Empty"),
+        ("waterTankEmpty", "Boolean", "Water Tank Empty"),
+        ("dripTrayFull", "Boolean", "Drip Tray Full"),
+    ],
+    "fridgeFreezer": [
+        ("setpointTemperatureRefrigerator", "Number", "Refrigerator Setpoint"),
+        ("setpointTemperatureFreezer", "Number", "Freezer Setpoint"),
+        ("doorAlarmFreezer", "Boolean", "Freezer Door Alarm"),
+        ("doorAlarmRefrigerator", "Boolean", "Refrigerator Door Alarm"),
+        ("superModeRefrigerator", "Boolean", "Refrigerator Super Mode"),
+        ("superModeFreezer", "Boolean", "Freezer Super Mode"),
+    ],
+    "homeConnectAppliance": [],
+}
+
+DISPLAY_NAME = {
+    "dishwasher": "Home Connect Dishwasher",
+    "dryer": "Home Connect Dryer",
+    "washer": "Home Connect Washer",
+    "oven": "Home Connect Oven",
+    "coffeeMaker": "Home Connect Coffee Maker",
+    "fridgeFreezer": "Home Connect Fridge Freezer",
+    "homeConnectAppliance": "Home Connect Appliance (generic)",
+}
+
+ORDER = ["dishwasher", "dryer", "washer", "oven", "coffeeMaker",
+         "fridgeFreezer", "homeConnectAppliance"]
+
+
+def state_xml(state_id, value_type, label):
+    if value_type == "Boolean":
+        vt = '<ValueType boolType="TrueFalse">Boolean</ValueType>'
+    else:
+        vt = f"<ValueType>{value_type}</ValueType>"
+    return (
+        f'\t\t\t<State id="{state_id}">\n'
+        f"\t\t\t\t{vt}\n"
+        f"\t\t\t\t<TriggerLabel>{label}</TriggerLabel>\n"
+        f"\t\t\t\t<ControlPageLabel>{label}</ControlPageLabel>\n"
+        f"\t\t\t</State>\n"
+    )
+
+
+# Long ConfigUI copy kept out of the template so source lines stay <=120 chars;
+# adjacent string literals concatenate with no newline, so output is unchanged.
+APPLIANCE_HELP = (
+    "Only appliances discovered on your Home Connect account are listed. "
+    "Authorize the plugin and wait a moment for discovery if the list is empty. "
+    'Appliances already assigned to another device are marked "(in use)".'
+)
+POLICY_DESC = (
+    'Some appliances report "off" as disconnected. Leave on to show Off; '
+    "turn off to flag a device error when it disconnects."
+)
+
+
+def device_xml(type_id):
+    states = "".join(state_xml(*s) for s in COMMON)
+    states += "".join(state_xml(*s) for s in TYPE_SPECIFIC[type_id])
+    return f"""\t<Device type="custom" id="{type_id}">
+\t\t<Name>{DISPLAY_NAME[type_id]}</Name>
+\t\t<ConfigUI>
+\t\t\t<SupportURL>{SUPPORT_URL}</SupportURL>
+\t\t\t<Field id="haId" type="menu">
+\t\t\t\t<Label>Appliance:</Label>
+\t\t\t\t<List class="self" method="listAppliances" dynamicReload="true"/>
+\t\t\t</Field>
+\t\t\t<Field id="applianceHelp" type="label" fontSize="small" alignWithControl="true">
+\t\t\t\t<Label>{APPLIANCE_HELP}</Label>
+\t\t\t</Field>
+\t\t\t<Field id="offWhenDisconnected" type="checkbox" defaultValue="true">
+\t\t\t\t<Label>Treat "disconnected" as Off:</Label>
+\t\t\t\t<Description>{POLICY_DESC}</Description>
+\t\t\t</Field>
+\t\t</ConfigUI>
+\t\t<States>
+{states}\t\t</States>
+\t\t<UiDisplayStateId>status</UiDisplayStateId>
+\t</Device>
+"""
+
+
+def main():
+    body = "\n".join(device_xml(t) for t in ORDER)
+    content = (
+        '<?xml version="1.0"?>\n'
+        "<!-- GENERATED by tools/gen_devices.py — seven Home Connect device types.\n"
+        "     Common states block is duplicated per type (PRD §4). -->\n"
+        "<Devices>\n"
+        f"{body}</Devices>\n"
+    )
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = os.path.join(
+        repo_root, "Home Connect.indigoPlugin", "Contents", "Server Plugin", "Devices.xml")
+    # Allow an explicit target via env override.
+    target = os.environ.get("DEVICES_XML_OUT", out)
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write(content)
+    print(f"wrote {target}")
+
+
+if __name__ == "__main__":
+    main()

@@ -405,3 +405,48 @@ def test_coordinator_unknown_appliance_triggers_discovery():
     coord._dispatch(SseEvent(STATUS, haid="UNKNOWN",  # pylint: disable=protected-access
                              data={"items": []}))
     assert posted == [0]                     # discovery scheduled immediately
+
+
+# -- supports_programs_for wired end-to-end (per-type budget guard) ------------
+
+def _reread_paths_for(appliance_info):
+    """Discover one appliance, drain its re-read queue, return the GET paths.
+
+    Uses the production resolver (plugin._supports_programs_for -> hc_constants)
+    so the per-type program-read decision is exercised end-to-end, not in
+    isolation."""
+    import plugin                                                   # noqa: PLC0415
+
+    paths = []
+
+    def get_json(path):
+        paths.append(path)
+        if path == "/api/homeappliances":
+            return {"data": {"homeappliances": [appliance_info]}}
+        if path.endswith("/status"):
+            return {"data": {"status": []}}
+        if path.endswith("/settings"):
+            return {"data": {"settings": []}}
+        return {"data": {}}
+
+    api = FakeAPI()
+    api.get_json = get_json
+    coord = HomeConnectCoordinator(
+        api, logger=Mock(), stream=StubStream(),
+        supports_programs_for=plugin._supports_programs_for)  # pylint: disable=protected-access
+    coord._discover()                                         # pylint: disable=protected-access
+    coord._scheduler.run_pending()                           # pylint: disable=protected-access
+    return paths
+
+
+def test_fridgefreezer_skips_program_reads_end_to_end():
+    paths = _reread_paths_for(
+        {"haId": "HA-FF", "name": "Fridge", "type": "FridgeFreezer", "connected": True})
+    assert not any(p.endswith(("/programs/selected", "/programs/active")) for p in paths), paths
+
+
+def test_dishwasher_reads_programs_end_to_end():
+    paths = _reread_paths_for(
+        {"haId": "HA-DW", "name": "Dish", "type": "Dishwasher", "connected": True})
+    assert any(p.endswith("/programs/selected") for p in paths), paths
+    assert any(p.endswith("/programs/active") for p in paths), paths

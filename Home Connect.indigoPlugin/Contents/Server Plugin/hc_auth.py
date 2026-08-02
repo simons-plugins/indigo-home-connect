@@ -310,27 +310,36 @@ class HomeConnectAuth:
                 self._state = new_state
 
     def run_device_flow(self, on_prompt=None, should_stop=None, max_restarts=1):
-        """Blocking driver: start the flow, poll until resolved, auto-restart
-        once on expiry. Runs on the *caller's* thread. ``on_prompt(info)`` is
-        called each time a new code is issued; ``should_stop()`` cancels."""
+        """Blocking driver: poll until resolved, auto-restart once on expiry.
+        Reuses a device code already stashed by :meth:`start_device_flow` (the
+        one whose user code the caller is displaying) — starting a fresh flow
+        here would orphan that code and the user would approve the wrong one.
+        Runs on the *caller's* thread. ``on_prompt(info)`` is called each time
+        a NEW code is issued; ``should_stop()`` cancels."""
         restarts = 0
-        while True:
+        with self._lock:
+            device = self._device
+            active = device is not None and self._now() < device["expires_at"]
+        if not active:
             info = self.start_device_flow()
             if on_prompt:
                 on_prompt(info)
-            while True:
-                if should_stop and should_stop():
-                    self._clear_device(STATE_UNAUTHORIZED)
-                    return ("cancelled", None)
-                self._sleep(self._device_interval)
-                status, detail = self.poll_device_flow()
-                if status in ("pending", "slow_down"):
-                    continue
-                if status == "expired" and restarts < max_restarts:
-                    restarts += 1
-                    self._logger.info("Home Connect device code expired; restarting authorization")
-                    break                 # restart the outer loop
-                return (status, detail)
+        while True:
+            if should_stop and should_stop():
+                self._clear_device(STATE_UNAUTHORIZED)
+                return ("cancelled", None)
+            self._sleep(self._device_interval)
+            status, detail = self.poll_device_flow()
+            if status in ("pending", "slow_down"):
+                continue
+            if status == "expired" and restarts < max_restarts:
+                restarts += 1
+                self._logger.info("Home Connect device code expired; restarting authorization")
+                info = self.start_device_flow()
+                if on_prompt:
+                    on_prompt(info)
+                continue
+            return (status, detail)
 
     # -- Authorization Code Grant (simulator only) --------------------------
     def authorize_simulator(self):
