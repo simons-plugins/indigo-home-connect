@@ -8,7 +8,8 @@ into Indigo.
     python3 tools/live_auth_check.py             # production Device Flow
     python3 tools/live_auth_check.py --simulator  # simulator Code Grant
 
-Reads ``.env`` from the repo root (``clientid = ...`` / ``clientsecret = ...``;
+Reads ``.env`` from the repo root (``clientid = ...`` / ``clientsecret = ...``,
+optionally ``simulator_clientid`` / ``simulator_clientsecret`` for ``--simulator``;
 spaces around ``=`` are tolerated). Tokens are cached in a gitignored
 ``.live_tokens.json`` so re-runs reuse the authorization. Appliance haIds are
 redacted in output.
@@ -52,8 +53,12 @@ def main():
     args = parser.parse_args()
 
     creds = load_env(ENV_FILE)
-    client_id = creds.get("clientid")
-    client_secret = creds.get("clientsecret", "")
+    if args.simulator:
+        client_id = creds.get("simulator_clientid") or creds.get("clientid")
+        client_secret = creds.get("simulator_clientsecret", "")
+    else:
+        client_id = creds.get("clientid")
+        client_secret = creds.get("clientsecret", "")
     if not client_id:
         sys.exit(f"No 'clientid' found in {ENV_FILE}")
 
