@@ -101,6 +101,28 @@ def test_parse_options_empty():
     assert hc_control.parse_options(None) == []
 
 
+@pytest.mark.parametrize("text", [
+    "key=",                 # empty value -> refuse (would otherwise send "")
+    "key=   ",              # whitespace-only value -> refuse
+    "K=1\nK=2",             # duplicate key -> refuse (contract: not last-wins)
+])
+def test_parse_options_hostile_refused(text):
+    with pytest.raises(ControlRefused):
+        hc_control.parse_options(text)
+
+
+def test_parse_options_hostile_coercions():
+    # unicode key preserved; huge int -> Python bigint; "+5" -> int 5;
+    # "1e3" is not an int literal -> stays string (documented in coerce_value).
+    result = hc_control.parse_options("Ключ=1\nBig=999999999999999999999\nPlus=+5\nExp=1e3")
+    assert result == [
+        {"key": "Ключ", "value": 1},
+        {"key": "Big", "value": 999999999999999999999},
+        {"key": "Plus", "value": 5},
+        {"key": "Exp", "value": "1e3"},
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Rate limiter: window + slide
 # ---------------------------------------------------------------------------
@@ -120,6 +142,31 @@ def test_rate_limiter_window_slides():
         limiter.acquire()
     clock.t += 61                       # whole window elapses
     limiter.acquire()                   # now allowed again — no raise
+
+
+def test_rate_limiter_thread_safe_exactly_limit_succeed():
+    import threading
+    limiter = RateLimiter(5, "Program start")     # real monotonic clock; all within window
+    barrier = threading.Barrier(10)
+    results = []
+    lock = threading.Lock()
+
+    def worker():
+        barrier.wait()                            # release all 10 at once
+        try:
+            limiter.acquire()
+            outcome = True
+        except ControlRefused:
+            outcome = False
+        with lock:
+            results.append(outcome)
+
+    threads = [threading.Thread(target=worker) for _ in range(10)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sum(results) == 5                       # exactly the limit succeed, no over-grant
 
 
 # ---------------------------------------------------------------------------
@@ -364,12 +411,26 @@ def test_start_watch_warns_if_still_ready_after_timeout():
     assert "did not start" in logger.warning.call_args[0][0]
 
 
-def test_start_watch_silent_when_program_starts():
+@pytest.mark.parametrize("state", ["Run", "DelayedStart"])
+def test_start_watch_silent_when_program_starts(state):
     appliance = make_appliance(op="Ready")
     scheduler = RecordingScheduler()
     logger = Mock()
     StartWatch(appliance, scheduler.post, logger=logger, delay=15)
-    # SSE reports the appliance moved to Run before the timeout fires:
-    appliance.merge_items([{"key": OPERATION_STATE, "value": _op("Run")}])
+    # SSE reports the appliance reached a started state before the timeout fires:
+    appliance.merge_items([{"key": OPERATION_STATE, "value": _op(state)}])
     scheduler.run_all()
     assert not logger.warning.called
+    assert appliance._observers.get(OPERATION_STATE) in (None, [])   # unsubscribed
+
+
+def test_start_watch_timeout_exception_safe_and_unsubscribes():
+    appliance = make_appliance(op="Ready")
+    scheduler = RecordingScheduler()
+    logger = Mock()
+    StartWatch(appliance, scheduler.post, logger=logger, delay=15)
+    # Simulate a torn-down appliance (e.g. plugin shutdown) so the check raises.
+    appliance.get = Mock(side_effect=RuntimeError("appliance gone"))
+    scheduler.run_all()                                # timer fires -> must not raise
+    assert logger.exception.called                     # logged cleanly
+    assert appliance._observers.get(OPERATION_STATE) in (None, [])   # still unsubscribed

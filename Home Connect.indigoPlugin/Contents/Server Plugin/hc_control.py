@@ -9,13 +9,14 @@ escalate to. Local refusals raise :class:`ControlRefused` with a
 user-actionable ``reason`` string; the plugin logs it as an error the user can
 act on ("Remote Start not allowed — enable it on the appliance").
 
-On top of the state pre-flight there are two local token-bucket limiters — five
+On top of the state pre-flight there are two local sliding-window limiters — five
 program starts and five stops per rolling 60 s — that refuse the sixth attempt
 *before* any HTTP, matching BSH's hard 5-per-minute limits.
 
 Capability lookups (available programs, available commands, PowerState allowed
 values) go through the 24 h :class:`~hc_cache.DiskCache`, so building an action
-menu costs at most one live request per appliance per day.
+menu costs at most one live request per appliance the first time a menu is
+opened; every later menu build that day is served from the cache.
 
 Never imports ``indigo``; all Indigo-touching code lives in ``plugin.py``. HTTP
 goes through an injected :class:`~hc_api.HomeConnectAPI`; the delayed start-watch
@@ -105,9 +106,11 @@ class StartWatch:
     Registers a one-shot observer on ``OperationState`` (fires as soon as the
     SSE stream reports Run/DelayedStart) and schedules a fallback check. Whichever
     happens first wins: an observed move cancels the warning; the timeout, if the
-    appliance is still Ready, logs a warning (a start can fail appliance-side —
-    door open, empty water tank — with no error returned to the caller). The
-    observer is always unsubscribed so nothing dangles.
+    appliance has not reached Run/DelayedStart, logs a warning (a start can fail
+    appliance-side — door open, empty water tank — with no error returned to the
+    caller). The timeout body is exception-guarded and always unsubscribes in a
+    ``finally``, so the observer never dangles even if the check itself throws
+    (e.g. during plugin shutdown).
     """
 
     def __init__(self, appliance, schedule, logger=None, delay=START_WATCH_DELAY):
@@ -124,16 +127,23 @@ class StartWatch:
             self._finish()
 
     def _timeout(self):
-        with self._lock:
-            if self._done:
-                return
-        current = hc.enum_tail(self._appliance.get(OPERATION_STATE))
-        if current not in _STARTED_STATES:
-            self._logger.warning(
-                "Home Connect %s: program did not start within %ds (operation state %s) — "
-                "check the door, water supply or tank on the appliance",
-                self._appliance.name, int(self._delay), current or "unknown")
-        self._finish()
+        # Runs on a timer thread. Guard the whole body so an exception (e.g. the
+        # appliance torn down during shutdown) still hits the finally and
+        # unsubscribes instead of dying on the timer thread and dangling.
+        try:
+            with self._lock:
+                if self._done:
+                    return
+            current = hc.enum_tail(self._appliance.get(OPERATION_STATE))
+            if current not in _STARTED_STATES:
+                self._logger.warning(
+                    "Home Connect %s: program did not start within %ds (operation state %s) — "
+                    "check the door, water supply or tank on the appliance",
+                    self._appliance.name, int(self._delay), current or "unknown")
+        except Exception:  # pylint: disable=broad-except
+            self._logger.exception("Home Connect %s: start-watch check failed", self._appliance.name)
+        finally:
+            self._finish()
 
     def _finish(self):
         with self._lock:
@@ -166,12 +176,16 @@ def coerce_value(raw):
 def parse_options(text):
     """Parse a ``key=value`` per-line block into an options list.
 
-    Blank lines and ``#`` comments are ignored; each remaining line must be
-    ``key=value`` (value coerced by :func:`coerce_value`). A malformed line
-    raises :class:`ControlRefused` so the user sees exactly what to fix rather
-    than the appliance rejecting an empty/garbage option.
+    Blank lines and ``#`` comments are ignored; each remaining line must be a
+    ``key=value`` with a non-empty key *and* a non-empty value (value coerced by
+    :func:`coerce_value`). A malformed line — no ``=``, empty key, empty value,
+    or a duplicate key — raises :class:`ControlRefused` so the user sees exactly
+    what to fix rather than the appliance rejecting a garbage/ambiguous option.
+    Duplicate keys are refused (not last-wins) so an accidental repeat can never
+    silently drop the value the user thinks they set.
     """
     options = []
+    seen = set()
     for line in (text or "").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -182,6 +196,11 @@ def parse_options(text):
         key = key.strip()
         if not key:
             raise ControlRefused(f"option override '{line}' has no key before '='")
+        if not value.strip():
+            raise ControlRefused(f"option override '{key}' has no value after '='")
+        if key in seen:
+            raise ControlRefused(f"option override '{key}' is set more than once")
+        seen.add(key)
         options.append({"key": key, "value": coerce_value(value)})
     return options
 
