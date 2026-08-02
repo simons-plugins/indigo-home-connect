@@ -177,3 +177,32 @@ def test_transport_error_retried_for_get():
     api = make_api(transport)
     assert api.get_json("/api/homeappliances") == {"data": {}}
     assert len(transport.requests) == 2
+
+
+# -- no_retry (program-start double-start guard, PRD §3.3) --------------------
+
+def test_put_no_retry_not_retried_on_transport_error():
+    transport = ScriptedTransport()
+    transport.queue_exception(OSError("timed out"))
+    api = make_api(transport)
+    with pytest.raises(HomeConnectError):
+        api.put_json("/api/homeappliances/x/programs/active", {"data": {}}, no_retry=True)
+    assert len(transport.requests) == 1     # a lost response must NOT re-send the start
+
+
+def test_put_no_retry_not_retried_on_5xx():
+    transport = ScriptedTransport()
+    transport.queue(500, HC_JSON, "{}")
+    api = make_api(transport)
+    with pytest.raises(HomeConnectError):
+        api.put_json("/api/homeappliances/x/programs/active", {"data": {}}, no_retry=True)
+    assert len(transport.requests) == 1
+
+
+def test_put_retried_by_default_on_5xx():
+    transport = ScriptedTransport()
+    transport.queue(500, HC_JSON, "{}")
+    transport.queue(204, HC_JSON, b"")
+    api = make_api(transport)
+    api.put_json("/api/homeappliances/x/settings/y", {"data": {}})   # idempotent -> retried
+    assert len(transport.requests) == 2

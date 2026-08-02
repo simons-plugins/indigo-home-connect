@@ -199,10 +199,13 @@ class HomeConnectAPI:
         raw = self.request("GET", path, accept=HC_CONTENT_TYPE, authorize=authorize)
         return self._parse_json(raw, path)
 
-    def put_json(self, path, payload, authorize=True):
+    def put_json(self, path, payload, authorize=True, no_retry=False):
+        """PUT a JSON body. ``no_retry`` disables the idempotent retry loop for
+        calls that must never be re-sent on a timeout — the program-start PUT,
+        where a retried request could double-start an appliance (PRD §3.3)."""
         body = json.dumps(payload)
         raw = self.request("PUT", path, headers={"Content-Type": HC_CONTENT_TYPE},
-                           body=body, accept=HC_CONTENT_TYPE, authorize=authorize)
+                           body=body, accept=HC_CONTENT_TYPE, authorize=authorize, no_retry=no_retry)
         return raw
 
     def post_form(self, path, form, authorize=False):
@@ -215,9 +218,11 @@ class HomeConnectAPI:
 
     # -- Core request loop ---------------------------------------------------
     def request(self, method, path, *, headers=None, body=None, accept=HC_CONTENT_TYPE,
-                authorize=True, on_unauthorized=None):
+                authorize=True, on_unauthorized=None, no_retry=False):
         method = method.upper()
-        idempotent = method in IDEMPOTENT_METHODS
+        # ``no_retry`` forces a single attempt even for idempotent methods so a
+        # program-start PUT is never re-sent after a lost response (PRD §3.3).
+        retryable = method in IDEMPOTENT_METHODS and not no_retry
         attempt = 0
         unauthorized_retried = False
         while True:
@@ -225,7 +230,7 @@ class HomeConnectAPI:
             try:
                 raw = self._perform(method, path, headers, body, accept, authorize)
             except HomeConnectError:
-                if self._can_retry(None, idempotent, attempt):
+                if self._can_retry(None, retryable, attempt):
                     attempt += 1
                     continue
                 raise
@@ -237,13 +242,13 @@ class HomeConnectAPI:
                 self._apply_retry_after(raw)
             err = self._build_error(raw, method, path)
 
-            if raw.status == 401 and not unauthorized_retried and idempotent:
+            if raw.status == 401 and not unauthorized_retried and retryable:
                 handler = on_unauthorized or self._on_unauthorized
                 if handler and handler(self._last_used_token):
                     unauthorized_retried = True
                     continue
 
-            if self._can_retry(raw.status, idempotent, attempt):
+            if self._can_retry(raw.status, retryable, attempt):
                 attempt += 1
                 continue
             raise err
@@ -369,10 +374,10 @@ class HomeConnectAPI:
         except (TypeError, ValueError):
             return None
 
-    def _can_retry(self, status, idempotent, attempt):
+    def _can_retry(self, status, retryable, attempt):
         if attempt >= self._max_retries:
             return False
-        if not idempotent:
+        if not retryable:
             return False
         if status is None:            # transport-level failure
             return True
