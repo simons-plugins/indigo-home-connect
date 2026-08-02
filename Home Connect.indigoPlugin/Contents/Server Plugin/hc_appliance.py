@@ -146,8 +146,8 @@ class HomeConnectAppliance:
         for callback in callbacks:
             try:
                 callback(key, value)
-            except Exception as exc:  # pylint: disable=broad-except
-                self._logger.exception(exc)
+            except Exception:  # pylint: disable=broad-except
+                self._logger.exception("Home Connect %s: observer for %s failed", self.name, key)
 
     # -- State merge ---------------------------------------------------------
     def merge_items(self, items):

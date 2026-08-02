@@ -12,9 +12,12 @@ Design constraints:
   and this module never imports ``indigo``. Every Indigo touch is a method call
   on the injected object (``updateStatesOnServer`` / ``setErrorStateOnServer`` /
   ``replacePluginPropsOnServer`` / ``stateListOrDisplayStateIdChanged``).
-* Observer callbacks arrive on the coordinator worker thread; a lock serialises
-  pushes and the ``attach``/``detach`` lifecycle so a late callback after a
-  device stop can never write to a detached device.
+* Observer callbacks arrive on the coordinator worker thread. A single lock is
+  held across the whole of :meth:`ApplianceBridge.push` — snapshot **and** the
+  ``updateStatesOnServer`` write — and across ``attach``/``detach``, so two
+  pushes serialise (no out-of-order batch) and a ``detach`` cannot land mid-push
+  (no write to a stopped device). The write re-checks ``_active`` afterwards so
+  a detach triggered *by* the write itself suppresses the trailing policy write.
 * Off-vs-disconnected is a per-device policy (PRD §3.7): treat a DISCONNECTED
   appliance as "Off" (clear error) or surface it as a device error state.
 """
@@ -22,6 +25,7 @@ import logging
 import threading
 from datetime import datetime, timezone
 
+from hc_api import redact
 import hc_constants as hc
 from hc_appliance import CONNECTED, OPERATION_STATE
 
@@ -54,8 +58,12 @@ def summarize_status(snapshot, treat_disconnected_as_off, last_event=None):
     """Compute the one-line ``status`` summary uiValue for a state snapshot.
 
     Running -> ``"Run · Eco 50 · 1:24 remaining"`` (program / remaining only when
-    present); otherwise one of ``Off`` / ``Standby`` / ``Ready`` / ``Finished`` /
-    ``Disconnected`` per the operation and power state and the disconnect policy.
+    present). Otherwise, in priority order: ``Off`` / ``Standby`` (from power or
+    an Inactive operation state), a mapped label for a known operation state
+    (``Ready``, ``Finished``), the **raw operation-state tail** for any
+    unmapped-but-present state, the ``last_event`` label as a fallback, and
+    finally ``Ready``. A disconnected appliance is ``Off`` or ``Disconnected``
+    per the policy.
     """
     if snapshot.get(CONNECTED) is False:
         return "Off" if treat_disconnected_as_off else "Disconnected"
@@ -106,19 +114,32 @@ class ApplianceBridge:
         self._lock = threading.RLock()
         self._appliance = None
         self._active = False
+        self._orphaned = False
         self._base_ids = hc.state_ids_for(device_type_id)
         self._dynamic_ids = set(_split_csv((device.pluginProps or {}).get(_DYNAMIC_PROP, "")))
         self._last_event = None
         self._last_event_time = None
 
+    @property
+    def is_attached(self):
+        with self._lock:
+            return self._active
+
     # -- Lifecycle -----------------------------------------------------------
     def attach(self, appliance):
-        """Subscribe to ``appliance`` and push its current state immediately."""
+        """Subscribe to ``appliance`` and push its current state immediately.
+
+        Clears carried per-appliance state (last event) and the orphaned flag so
+        a device reconfigured onto a different haId does not show the previous
+        appliance's last event."""
         with self._lock:
             if self._appliance is appliance and self._active:
                 return
             self._appliance = appliance
             self._active = True
+            self._orphaned = False
+            self._last_event = None
+            self._last_event_time = None
         appliance.subscribe(None, self._on_change)
         self.push()
 
@@ -138,8 +159,27 @@ class ApplianceBridge:
                 {"key": "connected", "value": False, "uiValue": "No"},
                 {"key": "status", "value": "Waiting", "uiValue": "Waiting for appliance…"},
             ])
-        except Exception as exc:  # pylint: disable=broad-except
-            self._logger.exception(exc)
+        except Exception:  # pylint: disable=broad-except
+            self._logger.exception("Home Connect %s: initial waiting-state write failed", self._ctx())
+
+    def mark_orphaned(self):
+        """Flag a device whose haId was absent from a full discovery cycle.
+
+        Sets an error state + status so the user sees the appliance is not on the
+        account, once (idempotent). If it later appears, ``attach`` clears this."""
+        with self._lock:
+            if self._orphaned or self._active:
+                return
+            self._orphaned = True
+        self._logger.warning("Home Connect %s: appliance not found on the account", self._ctx())
+        try:
+            self.device.updateStatesOnServer([
+                {"key": "connected", "value": False, "uiValue": "No"},
+                {"key": "status", "value": "Not found", "uiValue": "Not found on account"},
+            ])
+            self.device.setErrorStateOnServer("appliance not found on Home Connect account")
+        except Exception:  # pylint: disable=broad-except
+            self._logger.exception("Home Connect %s: orphan-state write failed", self._ctx())
 
     # -- Observer callback (worker thread) -----------------------------------
     def _on_change(self, key, value):
@@ -153,20 +193,32 @@ class ApplianceBridge:
 
     # -- State push ----------------------------------------------------------
     def push(self):
-        """Recompute and batch-write every state from the appliance snapshot."""
+        """Recompute and batch-write every state from the appliance snapshot.
+
+        The lock spans snapshot → dynamic registration → write → policy so
+        concurrent pushes serialise (no stale batch lands last) and a detach
+        cannot interleave with the write (docstring guarantee). After the write
+        the ``_active`` re-check drops the trailing policy write if the write
+        itself detached the bridge."""
         with self._lock:
             appliance = self._appliance
             if appliance is None:
                 return
             snapshot = appliance.state_snapshot()
             updates, new_dynamic = self._build_updates(snapshot)
-        if new_dynamic:
-            self._register_dynamic(new_dynamic)
-        try:
-            self.device.updateStatesOnServer(updates)
-        except Exception as exc:  # pylint: disable=broad-except
-            self._logger.exception(exc)
-        self._apply_connection_policy(snapshot)
+            if new_dynamic:
+                self._register_dynamic(new_dynamic)
+            try:
+                self.device.updateStatesOnServer(updates)
+            except Exception:  # pylint: disable=broad-except
+                self._logger.exception("Home Connect %s: state push failed", self._ctx())
+            if not self._active:
+                return                        # the write detached us; skip policy
+            self._apply_connection_policy(snapshot)
+
+    def _ctx(self):
+        """Log context for this device — name + redacted haId."""
+        return f"{self.device.name} (haId={redact(self.haid)})"
 
     def _build_updates(self, snapshot):
         updates = []
@@ -177,30 +229,43 @@ class ApplianceBridge:
                 updates.append(self._mapped_update(spec, value))
             else:
                 sid = hc.sanitise_state_key(bsh_key)
-                if not sid or sid in self._base_ids:
+                if not sid:
+                    self._logger.debug("Home Connect %s: dropping unmappable key %r",
+                                       self._ctx(), bsh_key)
+                    continue
+                if sid in self._base_ids:
                     continue
                 if sid not in self._dynamic_ids:
                     new_dynamic.append(sid)
                 updates.append({"key": sid, "value": _stringify(value), "uiValue": _stringify(value)})
 
-        # Derived: formatted remaining time, last event, and the summary.
-        remaining = snapshot.get(_REMAINING)
-        if remaining is not None:
-            formatted = hc.format_remaining(remaining) or ""
+        # Derived: formatted remaining time, last event, and the summary. Keyed on
+        # presence (not truthiness) so a null RemainingProgramTime at program end
+        # clears the formatted string too.
+        if _REMAINING in snapshot:
+            formatted = hc.format_remaining(snapshot.get(_REMAINING)) or ""
             updates.append({"key": "remainingTimeFormatted", "value": formatted, "uiValue": formatted})
-        if self._last_event is not None:
-            updates.append({"key": "lastEvent", "value": self._last_event, "uiValue": self._last_event})
-        if self._last_event_time is not None:
-            updates.append({"key": "lastEventTime", "value": self._last_event_time,
-                            "uiValue": self._last_event_time})
+        # Always emitted (as "" when unset) so an attach-time reset clears any
+        # last event carried from a previously-configured appliance (item 7).
+        last_event = self._last_event or ""
+        last_event_time = self._last_event_time or ""
+        updates.append({"key": "lastEvent", "value": last_event, "uiValue": last_event})
+        updates.append({"key": "lastEventTime", "value": last_event_time, "uiValue": last_event_time})
         summary = summarize_status(snapshot, self._treat_disconnected_as_off, self._last_event)
         updates.append({"key": "status", "value": summary, "uiValue": summary})
         return updates, new_dynamic
 
-    @staticmethod
-    def _mapped_update(spec, value):
+    # Safe cleared value per kind when Home Connect sends null to remove a key
+    # (e.g. RemainingProgramTime / ActiveProgram vanish at program end). Real
+    # Indigo rejects None for typed states, so clear to the type's empty value.
+    _CLEARED = {"enum": "", "int": 0, "num": 0, "bool": False, "event": False}
+
+    @classmethod
+    def _mapped_update(cls, spec, value):
         state_id, kind = spec
-        if kind == "enum":
+        if value is None:
+            out = cls._CLEARED.get(kind, "")
+        elif kind == "enum":
             out = hc.enum_tail(value)
         elif kind == "int":
             out = hc.clamp_percent(value) if state_id == "programProgress" else hc.to_int(value)
@@ -219,11 +284,16 @@ class ApplianceBridge:
 
         Order matters: pluginProps + ``stateListOrDisplayStateIdChanged`` must
         land before the value write so Indigo knows the state exists. On failure
-        the pluginProps write is rolled back (field notes rule 3).
+        BOTH the pluginProps write and the in-memory ``_dynamic_ids`` are rolled
+        back to their prior values (field notes rule 3) — so the next push retries
+        the registration instead of forever emitting an unregistered key. A
+        rollback write that itself fails is logged at warning (not swallowed):
+        rolled-back and rollback-failed are different states.
         """
         with self._lock:
+            previous = set(self._dynamic_ids)
             merged = sorted(self._dynamic_ids | set(new_ids))
-            if merged == sorted(self._dynamic_ids):
+            if merged == sorted(previous):
                 return
             self._dynamic_ids = set(merged)
         props = dict(self.device.pluginProps)
@@ -232,14 +302,19 @@ class ApplianceBridge:
         try:
             self.device.replacePluginPropsOnServer(props)
             self.device.stateListOrDisplayStateIdChanged()
-        except Exception as exc:  # pylint: disable=broad-except
+        except Exception:  # pylint: disable=broad-except
+            # Restore in-memory state too, or registration never retries.
+            with self._lock:
+                self._dynamic_ids = previous
+            self._logger.exception("Home Connect %s: dynamic-state registration failed; "
+                                   "will retry on next update", self._ctx())
             rollback = dict(self.device.pluginProps)
             rollback[_DYNAMIC_PROP] = before
             try:
                 self.device.replacePluginPropsOnServer(rollback)
             except Exception:  # pylint: disable=broad-except
-                pass
-            self._logger.exception(exc)
+                self._logger.warning("Home Connect %s: rollback of dynamic-state props "
+                                     "also failed", self._ctx())
 
     def _apply_connection_policy(self, snapshot):
         connected = snapshot.get(CONNECTED)
@@ -248,8 +323,8 @@ class ApplianceBridge:
                 self.device.setErrorStateOnServer("Disconnected")
             else:
                 self.device.setErrorStateOnServer(None)
-        except Exception as exc:  # pylint: disable=broad-except
-            self._logger.exception(exc)
+        except Exception:  # pylint: disable=broad-except
+            self._logger.exception("Home Connect %s: setting error state failed", self._ctx())
 
 
 def _split_csv(text):
