@@ -90,3 +90,26 @@ def test_invalidate_removes_entry(tmp_path):
     loader = Mock(return_value={"v": 2})
     assert cache.get("k", loader) == {"v": 2}
     loader.assert_called_once()
+
+
+def test_loader_runs_outside_the_lock(tmp_path):
+    # The loader may perform a slow HTTP request (or wait out the rate-limit
+    # gate); holding the cache lock across it would queue every other reader —
+    # including Indigo UI menu builds — behind one stalled load.
+    import threading
+    from unittest.mock import Mock
+    cache = DiskCache(str(tmp_path / "c.json"), "v", logger=Mock())
+    other_done = threading.Event()
+
+    def other_reader():
+        cache.get("other", lambda: "o")
+        other_done.set()
+
+    def slow_loader():
+        worker = threading.Thread(target=other_reader)
+        worker.start()
+        assert other_done.wait(1.0), "cache lock held across loader: reader deadlocked"
+        worker.join(1.0)
+        return "v1"
+
+    assert cache.get("k", slow_loader) == "v1"

@@ -130,6 +130,10 @@ class FakeAPI:
         self.request_results = deque()
         self.token_provider = None
         self.unauthorized_handler = None
+        self.gate_wait = 0.0            # settable: simulates a closed request gate
+
+    def gate_wait_remaining(self):
+        return self.gate_wait
 
     def queue_post(self, item):
         self.post_results.append(item)

@@ -10,7 +10,9 @@ daily-budget request). This module:
   stray HTTP headers, restarts the stream on structurally unparseable input;
 * runs an infinite reconnect loop with a 120 s read timeout (dead-stream
   detection) and synthetic START/STOP events to the appliance handlers, honoring
-  a 429 ``Retry-After`` through ``hc_api``'s shared request gate;
+  a 429 ``Retry-After`` through ``hc_api``'s shared request gate, with backoff
+  escalating to 15 min after sustained failures (every open is a counted
+  request);
 * routes wire events (STATUS/EVENT/NOTIFY/CONNECTED/DISCONNECTED/PAIRED/DEPAIRED)
   to the right :class:`~hc_appliance.HomeConnectAppliance`;
 * discovers appliances at most hourly and runs each appliance's sequential
@@ -39,6 +41,16 @@ DISCOVERY_INTERVAL = 60 * 60          # appliance-list poll at most hourly (PRD 
 # Reconnect backoff for non-429 stream failures (429 is handled by the gate).
 RECONNECT_MIN_DELAY = 1.0
 RECONNECT_MAX_DELAY = 60.0
+
+# Every stream open is a counted request, so a sustained outage at the 60 s cap
+# would burn ~1440/day — more than the whole budget. After this many consecutive
+# failed cycles the delay escalates to the extended value; a stream that then
+# survives ``RECONNECT_STABLE_SECONDS`` resets the count. A connect that dies
+# faster than that ALSO counts as a failure (connect-drop flapping burns opens
+# just like refused opens do).
+RECONNECT_ESCALATE_AFTER = 5
+RECONNECT_EXTENDED_DELAY = 15 * 60.0
+RECONNECT_STABLE_SECONDS = 120.0
 
 # How often the paused reader re-checks whether authorization has returned.
 AUTH_POLL_INTERVAL = 30.0
@@ -168,7 +180,10 @@ class EventStream:
     def __init__(self, api, dispatch, logger=None, path=EVENTS_PATH,
                  read_timeout=STREAM_READ_TIMEOUT, sleep=None,
                  reconnect_min=RECONNECT_MIN_DELAY, reconnect_max=RECONNECT_MAX_DELAY,
-                 auth_ok=None, auth_poll=AUTH_POLL_INTERVAL):
+                 reconnect_extended=RECONNECT_EXTENDED_DELAY,
+                 escalate_after=RECONNECT_ESCALATE_AFTER,
+                 stable_seconds=RECONNECT_STABLE_SECONDS,
+                 auth_ok=None, auth_poll=AUTH_POLL_INTERVAL, monotonic=time.monotonic):
         self._api = api
         self._dispatch = dispatch
         self._logger = logger or logging.getLogger("hc_events")
@@ -177,6 +192,10 @@ class EventStream:
         self._sleep = sleep
         self._reconnect_min = reconnect_min
         self._reconnect_max = reconnect_max
+        self._reconnect_extended = reconnect_extended
+        self._escalate_after = escalate_after
+        self._stable_seconds = stable_seconds
+        self._monotonic = monotonic
         # auth_ok() -> True while authorized; False halts the reconnect loop
         # (e.g. refresh failed with invalid_grant -> STATE_AUTH_REQUIRED). The
         # loop idles and resumes only when authorization returns (PRD §6).
@@ -187,6 +206,7 @@ class EventStream:
 
     def run(self, stop_event):
         backoff = 0.0
+        failures = 0
         auth_paused_logged = False
         while not stop_event.is_set():
             if self._auth_ok is not None and not self._auth_ok():
@@ -199,11 +219,20 @@ class EventStream:
             auth_paused_logged = False
 
             error = None
+            opened_at = None
             try:
-                stream = self._api.open_stream(self._path, read_timeout=self._read_timeout)
+                stream = self._api.open_stream(self._path, read_timeout=self._read_timeout,
+                                               abort_check=stop_event.is_set)
                 with self._current_lock:
                     self._current = stream
+                # A coordinator stop() racing the open-to-register gap would
+                # have closed a _current that was still None; re-check so the
+                # reader never enters lines() on a stream that shutdown can no
+                # longer reach.
+                if stop_event.is_set():
+                    raise HomeConnectError("stream opened during shutdown", aborted=True)
                 self._logger.info("Home Connect event stream connected")
+                opened_at = self._monotonic()
                 self._dispatch(SseEvent(START))
                 backoff = 0.0
                 for event in self._read_events(stream):
@@ -212,9 +241,10 @@ class EventStream:
                     self._dispatch(event)
             except HomeConnectError as exc:
                 error = exc
-                if stop_event.is_set():
-                    # Deliberate shutdown: stop() closed the socket out from under
-                    # the blocked read, so this failure is expected — not a warning.
+                if stop_event.is_set() or exc.aborted:
+                    # Deliberate teardown: stop() closed the socket under the
+                    # blocked read, or abort() fired just before the stop event
+                    # was set — expected either way, not a warning.
                     self._logger.debug("Home Connect event stream closed for shutdown: %s", exc)
                 else:
                     self._logger.warning("Home Connect event stream ended: %s — "
@@ -227,7 +257,21 @@ class EventStream:
             self._dispatch(SseEvent(STOP, error=error))
             if stop_event.is_set():
                 break
+            # Every open is a counted request: a failed open, or a stream that
+            # died before proving stable, counts toward escalation.
+            lived = (self._monotonic() - opened_at) if opened_at is not None else 0.0
+            if opened_at is not None and lived >= self._stable_seconds:
+                failures = 0
+            else:
+                failures += 1
             backoff = min(backoff * 2 or self._reconnect_min, self._reconnect_max)
+            if failures >= self._escalate_after:
+                if failures == self._escalate_after:
+                    self._logger.warning(
+                        "Home Connect event stream failing repeatedly (%d attempts); "
+                        "slowing reconnects to every %.0f minutes to protect the daily "
+                        "request budget", failures, self._reconnect_extended / 60)
+                backoff = self._reconnect_extended
             self._wait(stop_event, backoff)
 
     def _read_events(self, stream):

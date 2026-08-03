@@ -11,7 +11,11 @@ act on ("Remote Start not allowed — enable it on the appliance").
 
 On top of the state pre-flight there are two local sliding-window limiters — five
 program starts and five stops per rolling 60 s — that refuse the sixth attempt
-*before* any HTTP, matching BSH's hard 5-per-minute limits.
+*before* any HTTP, matching BSH's hard 5-per-minute limits. A third refusal
+family guards the shared request gate: while a 429 ``Retry-After`` block is in
+force (>5 s remaining), control calls refuse locally with a wait time and
+capability loads fall back to the stale cache, so no Indigo thread ever blocks
+out a rate-limit window.
 
 Capability lookups (available programs, available commands, PowerState allowed
 values) go through the 24 h :class:`~hc_cache.DiskCache`, so building an action
@@ -66,6 +70,12 @@ START_WATCH_DELAY = 60.0
 # How long auto-power-on waits (event-driven) for OperationState to reach Ready
 # after powering an appliance on, before giving up. Injectable for tests.
 READY_TIMEOUT = 25.0
+
+# Refuse control/capability HTTP locally when the shared request gate is closed
+# for longer than this. Real 429 blocks carry Retry-After values from minutes to
+# 24 h; blocking an Indigo action or UI thread on that is far worse than
+# refusing with a time.
+GATE_REFUSE_THRESHOLD = 5.0
 
 
 class ControlRefused(Exception):
@@ -234,7 +244,26 @@ class Controller:
         self._stop_limiter = RateLimiter(STOP_LIMIT, "Program stop", now=now)
         self._ready_timeout = ready_timeout
 
-    # -- Guard rails (raise ControlRefused; read only the local state cache) --
+    # -- Guard rails (refuse locally, before any HTTP: state-cache checks raise
+    # ControlRefused; the capability-gate check raises HomeConnectError so the
+    # stale-cache fallback still works) -------------------------------------
+    def _require_gate_open(self):
+        """Refuse before any HTTP while the client is rate-limited."""
+        wait = self._api.gate_wait_remaining()
+        if wait > GATE_REFUSE_THRESHOLD:
+            minutes = int(wait // 60) + 1
+            raise ControlRefused(
+                f"Home Connect is rate-limited — try again in about {minutes} minute(s)")
+
+    def _require_capability_gate(self):
+        """Loader-side gate check: raises :class:`~hc_api.HomeConnectError` (not
+        ControlRefused) so a rate-limited capability load falls back to the
+        stale cached value, and a menu build degrades to a logged warning."""
+        wait = self._api.gate_wait_remaining()
+        if wait > GATE_REFUSE_THRESHOLD:
+            raise HomeConnectError(f"rate-limited for another {wait:.0f}s",
+                                   status=429, retry_after=wait)
+
     @staticmethod
     def _require_connected(appliance):
         if not appliance.connected:
@@ -369,10 +398,12 @@ class Controller:
         return self.power_constraints(appliance).get("allowedvalues", []) or []
 
     def _load_all_programs(self, haid):
+        self._require_capability_gate()
         data = self._api.get_json(f"/api/homeappliances/{haid}/programs")
         return (data or {}).get("data", {}).get("programs", []) or []
 
     def _load_commands(self, haid):
+        self._require_capability_gate()
         try:
             data = self._api.get_json(f"/api/homeappliances/{haid}/commands")
         except HomeConnectError as exc:
@@ -382,6 +413,7 @@ class Controller:
         return (data or {}).get("data", {}).get("commands", []) or []
 
     def _load_power_constraints(self, haid):
+        self._require_capability_gate()
         data = self._api.get_json(f"/api/homeappliances/{haid}/settings/{POWER_STATE_KEY}")
         return (data or {}).get("data", {}).get("constraints", {}) or {}
 
@@ -396,6 +428,7 @@ class Controller:
         on. The power-on PUT is not a program start; the limiter counts once."""
         if not program_key:
             raise ControlRefused("no program selected to start")
+        self._require_gate_open()
         if power_on_first:
             self._ensure_powered_on(appliance)
         self._require_remote_start(appliance)
@@ -413,6 +446,7 @@ class Controller:
         for Ready) before the powered check."""
         if not program_key:
             raise ControlRefused("no program chosen to select")
+        self._require_gate_open()
         if power_on_first:
             self._ensure_powered_on(appliance)
         self._require_powered(appliance)
@@ -423,6 +457,7 @@ class Controller:
 
     def stop_program(self, appliance):
         """DELETE /programs/active — only from a stoppable operation state."""
+        self._require_gate_open()
         self._require_connected(appliance)
         op = hc.enum_tail(appliance.get(OPERATION_STATE))
         if op not in _STOPPABLE_STATES:
@@ -444,6 +479,7 @@ class Controller:
 
     def send_command(self, appliance, command_key):
         """PUT /commands/{key} — only if the command is in the available set."""
+        self._require_gate_open()
         self._require_connected(appliance)
         available = {c.get("key") for c in self.available_commands(appliance)}
         if command_key not in available:
@@ -470,6 +506,7 @@ class Controller:
 
     def set_setting(self, appliance, setting_key, value):
         """PUT /settings/{key} — advanced/freeform; data.key matches the path key."""
+        self._require_gate_open()
         self._require_connected(appliance)
         if not setting_key:
             raise ControlRefused("no setting key provided")

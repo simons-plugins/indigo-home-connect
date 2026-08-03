@@ -224,22 +224,22 @@ def test_control_error_hint_maps_statuses():
     assert plugin._control_error_hint(HomeConnectError("boom", status=500)) == "boom"
 
 
-def test_429_retry_after_surfaces_once_second_start_waits_on_gate(tmp_path):
+def test_429_retry_after_second_start_refused_locally_not_blocking(tmp_path):
     transport = ScriptedTransport()
     transport.queue(429, {"content-type": "application/json", "retry-after": "30"}, "{}")
-    transport.queue(204, HC_JSON, b"")
     p = _plugin(transport, tmp_path)
     p._coordinator = _FakeCoord([_appliance()])
     # First start hits the 429: surfaces once, no retry (no_retry start).
     p.startProgram(_Action({"program": "X.Program"}), _device())
     assert p.logger.error.call_count == 1
-    # Second start within the window waits on the shared gate (clock.sleep 30s)
-    # then succeeds — one gate warning, no duplicate of the first PUT.
+    # Second start within the Retry-After window must be REFUSED locally — an
+    # Indigo action thread must never block out a gate that can run to hours.
     p.startProgram(_Action({"program": "X.Program"}), _device())
-    assert 30 in p._test_clock.slept
-    gate_warnings = [c for c in p._test_api_logger.warning.call_args_list if "rate limit" in str(c)]
-    assert len(gate_warnings) == 1
-    assert [r["method"] for r in transport.requests] == ["PUT", "PUT"]   # no duplicate start
+    assert p.logger.error.call_count == 2
+    message = " ".join(str(a) for a in p.logger.error.call_args[0])
+    assert "rate-limited" in message and "try again" in message
+    assert 30 not in p._test_clock.slept                        # never slept the gate out
+    assert [r["method"] for r in transport.requests] == ["PUT"]  # no second HTTP at all
 
 
 # ---------------------------------------------------------------------------

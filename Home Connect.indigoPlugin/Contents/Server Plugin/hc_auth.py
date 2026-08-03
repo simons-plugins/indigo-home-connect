@@ -49,6 +49,13 @@ TOKEN_PATH = "/security/oauth/token"
 # (refresh limit is 10/min) — see PRD §2.
 REFRESH_WINDOW = 60 * 60
 MIN_REFRESH_INTERVAL = 6
+
+# Exponential backoff for a refresh that fails for a generic reason (not 429,
+# not invalid_grant): the token endpoint allows only 10/min and 100/day, so a
+# broken client secret or a persistent 500 must not be retried every 60 s
+# supervisor tick (that alone would blow the endpoint's own daily limit).
+REFRESH_BACKOFF_BASE = 60
+REFRESH_BACKOFF_MAX = 60 * 60
 DEFAULT_DEVICE_INTERVAL = 5
 DEFAULT_DEVICE_EXPIRES = 300
 SLOW_DOWN_STEP = 5
@@ -181,6 +188,7 @@ class HomeConnectAuth:
         self._device_interval = DEFAULT_DEVICE_INTERVAL
         self._last_refresh_attempt = 0.0
         self._refresh_backoff_until = 0.0
+        self._refresh_failures = 0
         self._stale = False
         self._state = STATE_AUTHORIZED if self._store.get(self._client_id) else STATE_UNAUTHORIZED
 
@@ -189,6 +197,16 @@ class HomeConnectAuth:
         """Supersede this instance: a late device-flow result won't be persisted."""
         with self._lock:
             self._stale = True
+
+    def matches(self, client_id, client_secret, simulator):
+        """True when this instance already represents exactly this client config.
+
+        A prefs save with unchanged values is a no-op supersession and must NOT
+        mark this instance stale — a device-flow authorization may be pending on
+        it, and marking it stale would silently discard the granted token."""
+        return (self._client_id == (client_id or "")
+                and self._client_secret == (client_secret or "")
+                and self._simulator == bool(simulator))
 
     # -- Public state accessors ---------------------------------------------
     @property
@@ -391,11 +409,17 @@ class HomeConnectAuth:
     def refresh_if_needed(self, force=False):
         """Refresh the access token if it is within :data:`REFRESH_WINDOW` of
         expiry (or ``force``). Honors the minimum refresh interval and any
-        ``Retry-After`` backoff. Concurrent callers collapse to one HTTP refresh.
-        Returns True if the current token is fresh afterwards."""
+        active backoff — a 429 ``Retry-After`` or the exponential backoff after
+        repeated generic failures. Defers (returns False) while the shared
+        request gate is closed: a token POST would otherwise block the caller —
+        the plugin's supervisor thread — for the whole Retry-After. Concurrent
+        callers collapse to one HTTP refresh. Returns True if the current token
+        is fresh afterwards."""
         entry = self._store.get(self._client_id)
         if not entry:
             return False
+        if self._api.gate_wait_remaining() > 0:
+            return False              # gate closed: retried on a later tick
         with self._lock:
             if self._state == STATE_AUTH_REQUIRED:
                 return False              # dead refresh token: re-auth required, don't resubmit
@@ -445,10 +469,20 @@ class HomeConnectAuth:
                     self._logger.error("Home Connect authorization lost (access revoked or unused "
                                        ">60 days). Re-authorize the plugin in its configuration.")
                     return False
-                self._logger.error("Home Connect token refresh failed: %s", exc)
+                # Generic failure (bad secret, token-endpoint 500, transport):
+                # back off exponentially — the supervisor re-drives every 60 s,
+                # and the token endpoint allows only 100 refreshes/day.
+                self._refresh_failures += 1
+                backoff = min(REFRESH_BACKOFF_BASE * (2 ** (self._refresh_failures - 1)),
+                              REFRESH_BACKOFF_MAX)
+                with self._lock:
+                    self._refresh_backoff_until = self._now() + backoff
+                self._logger.error("Home Connect token refresh failed: %s — next attempt in %ds",
+                                   exc, backoff)
                 return False
             self._store_token(data)
             self._store.note_refresh(self._client_id, self._now())
+            self._refresh_failures = 0
             self._logger.info("Home Connect access token refreshed")
             return True
 

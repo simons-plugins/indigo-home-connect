@@ -602,3 +602,63 @@ def test_start_watch_timeout_exception_safe_and_unsubscribes():
     scheduler.run_all()                                # timer fires -> must not raise
     assert logger.exception.called                     # logged cleanly
     assert appliance._observers.get(OPERATION_STATE) in (None, [])   # still unsubscribed
+
+
+# -- Red-team wave 1: fail-fast when the gate is closed (#8) ------------------
+
+def test_control_refused_locally_when_gate_closed(tmp_path):
+    # A Retry-After can run to hours; an Indigo action thread must be refused
+    # with a time, never blocked on the gate.
+    transport = ScriptedTransport()
+    controller = make_controller(transport, tmp_path)
+    controller._api._earliest_retry = 600.0        # gate closed for 10 minutes
+    with pytest.raises(ControlRefused) as exc:
+        controller.start_program(make_appliance(), "BSH.Common.Program.Auto")
+    assert "rate-limited" in str(exc.value)
+    assert transport.requests == []                # nothing left the plugin
+
+
+def test_capability_load_serves_stale_cache_when_gated(tmp_path):
+    transport = ScriptedTransport()
+    body = json.dumps({"data": {"programs": [{"key": "P1"}]}})
+    transport.queue(200, HC_JSON, body)
+    controller = make_controller(transport, tmp_path)
+    appliance = make_appliance()
+    assert controller.all_programs(appliance) == [{"key": "P1"}]   # first load cached
+    # Entry expired AND the gate closed: the stale value must serve, no HTTP.
+    controller._cache._entries[f"all-programs:{HAID}"]["ts"] = -999_999
+    controller._api._earliest_retry = 600.0
+    assert controller.all_programs(appliance) == [{"key": "P1"}]
+    assert len(transport.requests) == 1            # no second request attempted
+
+
+@pytest.mark.parametrize("op", [
+    lambda c, a: c.start_program(a, "Dishcare.Dishwasher.Program.Auto2"),
+    lambda c, a: c.select_program(a, "Dishcare.Dishwasher.Program.Auto2"),
+    lambda c, a: c.stop_program(a),
+    lambda c, a: c.send_command(a, "BSH.Common.Command.PauseProgram"),
+    lambda c, a: c.set_setting(a, "SomeKey", "value"),
+])
+def test_every_control_entry_point_refused_when_gate_closed(tmp_path, op):
+    # Each entry point carries its own gate check; dropping any one silently
+    # reverts that action to blocking an Indigo thread for hours.
+    transport = ScriptedTransport()
+    controller = make_controller(transport, tmp_path)
+    controller._api._earliest_retry = 600.0
+    with pytest.raises(ControlRefused) as exc:
+        op(controller, make_appliance())
+    assert "rate-limited" in str(exc.value)
+    assert transport.requests == []
+
+
+def test_gated_capability_load_with_no_cache_raises_without_http(tmp_path):
+    # No stale entry to fall back on: the loader's gate check must surface the
+    # rate limit as a HomeConnectError (menus degrade to a logged warning +
+    # empty list) and attempt zero HTTP.
+    transport = ScriptedTransport()
+    controller = make_controller(transport, tmp_path)
+    controller._api._earliest_retry = 600.0
+    with pytest.raises(HomeConnectError) as exc:
+        controller.all_programs(make_appliance())
+    assert exc.value.status == 429
+    assert transport.requests == []

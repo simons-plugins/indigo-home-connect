@@ -181,6 +181,29 @@ class ApplianceBridge:
         except Exception:  # pylint: disable=broad-except
             self._logger.exception("Home Connect %s: orphan-state write failed", self._ctx())
 
+    def mark_auth_required(self):
+        """Surface lost authorization on the device.
+
+        Called when the coordinator is stopped because the refresh token died
+        (revoked, or the 60-day idle expiry). Without this the device keeps its
+        last pushed state — ``connected=true``, ``status=Ready/Run`` — and looks
+        healthy for weeks while serving stale data. A later re-authorization
+        restarts the stream and the re-read push clears the error state.
+
+        Holds the bridge lock so an in-flight ``push()`` on the worker thread
+        cannot land a stale ``connected=true`` batch after this write."""
+        with self._lock:
+            try:
+                self.device.updateStatesOnServer([
+                    {"key": "connected", "value": False, "uiValue": "No"},
+                    {"key": "status", "value": "Authorization required",
+                     "uiValue": "Authorization required"},
+                ])
+                self.device.setErrorStateOnServer("Authorization required")
+            except Exception:  # pylint: disable=broad-except
+                self._logger.exception("Home Connect %s: auth-required state write failed",
+                                       self._ctx())
+
     # -- Observer callback (worker thread) -----------------------------------
     def _on_change(self, key, value):
         with self._lock:

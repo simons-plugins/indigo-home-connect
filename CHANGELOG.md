@@ -5,6 +5,64 @@ All notable changes to the Home Connect plugin. Format loosely follows
 convention). Versions `2026.0.x` were the phased internal build-up; **`2026.1.0`** is the
 first release of the complete, user-visible feature set.
 
+## [2026.1.3] — 2026-08-03
+
+Red-team hardening, wave 1 — fixes for the highest-severity findings of the
+2026-08-03 audit (issues #8–#14; the full findings list is issues #8–#22).
+
+### Fixed
+- **Rate-limit gate is now interruptible and never blocks Indigo threads (#8).**
+  A real 429 block can carry a Retry-After of minutes to 24 h. The gate wait now
+  runs in 1 s slices against an abort event (plugin shutdown / client rebuild
+  unblocks it immediately); control actions and dynamic menus **refuse locally**
+  ("rate-limited — try again in N min") instead of sleeping; capability loads
+  fall back to the stale 24 h cache when gated; and the disk cache no longer
+  holds its lock across a loader's HTTP round-trip.
+- **Closing the config dialog no longer kills an in-flight authorization (#9).**
+  Saving with unchanged credentials is now a no-op supersession (the pending
+  device-flow worker, stream and rate-limiter windows are kept); Cancel leaves
+  the polling worker running, as the dialog text has always promised.
+- **Losing authorization now shows on the devices (#10).** When the refresh
+  token dies (revoked / 60-day idle expiry) every bridged device flips to
+  ``connected=false`` / "Authorization required" with a device error state,
+  instead of freezing indefinitely at its last healthy-looking state.
+- **Quota-burn loops now back off (#11, #13, #14).** Stream reconnects escalate
+  from the 60 s cap to 15 min after 5 consecutive failures (a failed open OR a
+  stream that dies within 120 s); a 429 **without** Retry-After now applies a
+  synthetic 60 s gate; transport/5xx retries wait 2 s/4 s/8 s between attempts
+  (the 10-successive-errors block counts back-to-back retries); and a failing
+  token refresh backs off exponentially (60 s → 1 h cap) instead of hitting the
+  100/day token endpoint every supervisor tick.
+- **Reconnect re-reads are suppressed within a 5-minute freshness window (#12).**
+  A stream blip or a CONNECTED flap just after a completed full read no longer
+  costs another 3–5 GET pass (self-powering-off dishwashers flap by design);
+  PAIRED and first discovery still force a read. Abandoned passes never arm the
+  window.
+
+Review round (CodeRabbit + 4-lens agent review) — further fixes on the same
+findings:
+- A 429 **received mid-request** with a long Retry-After now raises to the
+  caller instead of re-entering the gate wait — the pre-flight check passes
+  moments before the 429 lands, and retrying would block the calling (possibly
+  Indigo UI/action) thread for the whole block. Short blocks (≤5 s) are still
+  waited out and retried.
+- Auth-required device marking is now **level-triggered as well as
+  edge-triggered**: a device created or restarted while authorization is dead
+  shows "Authorization required" (not "Waiting for appliance…"), and a device
+  flow that ends denied/expired/failed marks devices from the worker (the
+  coordinator-stop edge never fires in that path).
+- Pressing **Authorize** now stops a coordinator wired to the superseded
+  client, instead of leaving its reconnect loop error-spinning against the
+  aborted api (false "failing repeatedly" warnings) until the next tick.
+- Token refresh **defers while the request gate is closed** — a token POST
+  would otherwise block the supervisor thread (stalling reconcile) for the
+  whole Retry-After.
+- Requests abandoned by shutdown/supersession are tagged and logged as
+  teardown (debug), never as "read failed … retrying in Ns" warnings that
+  would be false twice over.
+- Gate-wait log lines humanize long delays ("24.0h", not "86400.0s"); the 429
+  action hint uses the server's actual Retry-After when present.
+
 ## [2026.1.2] — 2026-08-03
 
 ### Added

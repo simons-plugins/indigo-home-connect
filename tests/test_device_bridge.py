@@ -384,3 +384,13 @@ def test_fridge_setpoints_number_states():
     ])
     assert dev.states["setpointTemperatureRefrigerator"] == 4
     assert dev.states["superModeFreezer"] is True
+
+
+# -- Red-team wave 1: auth-loss surface (#10) ---------------------------------
+
+def test_mark_auth_required_surfaces_error_state():
+    bridge, dev = make_bridge()
+    bridge.mark_auth_required()
+    assert dev.states["connected"] is False
+    assert dev.states["status"] == "Authorization required"
+    assert dev.error_state == "Authorization required"

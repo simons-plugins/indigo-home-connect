@@ -99,3 +99,75 @@ def test_reconcile_restarts_on_stale_api_never_two_streams(monkeypatch):
     # The old stream was stopped strictly before the new one started.
     events = _FakeCoordinator.events
     assert events.index(("stop", id(old))) < events.index(("start", id(new)))
+
+
+# -- Red-team wave 1: auth loss surfaces on devices (#10), no-op supersession (#9)
+
+from unittest.mock import Mock
+
+
+def test_auth_loss_marks_bridged_devices(monkeypatch):
+    # When the refresh token dies mid-flight, devices must NOT freeze at their
+    # last healthy-looking state: every bridge gets mark_auth_required().
+    _patch(monkeypatch)
+    p = _plugin()
+    auth = _FakeAuth(STATE_AUTHORIZED)
+    p._api = object()                         # pylint: disable=protected-access
+    p._auth = auth                            # pylint: disable=protected-access
+    p._reconcile_coordinator()                # pylint: disable=protected-access
+    bridge = Mock()
+    p._bridges[1] = bridge                    # pylint: disable=protected-access
+
+    auth._state = STATE_AUTH_REQUIRED
+    p._reconcile_coordinator()                # pylint: disable=protected-access
+    bridge.mark_auth_required.assert_called_once()
+
+
+def test_rebuild_with_unchanged_client_is_noop_supersession():
+    # A prefs save with unchanged values must keep the live auth instance —
+    # a pending device-flow authorization dies if it is marked stale.
+    p = _plugin()
+
+    class _MatchingAuth(_FakeAuth):
+        def __init__(self):
+            super().__init__()
+            self.staled = False
+
+        def matches(self, client_id, client_secret, simulator):  # noqa: ARG002
+            return True
+
+        def mark_stale(self):
+            self.staled = True
+
+    auth = _MatchingAuth()
+    api = object()
+    p._api = api                              # pylint: disable=protected-access
+    p._auth = auth                            # pylint: disable=protected-access
+    p._rebuild_client()                       # pylint: disable=protected-access
+    assert p._auth is auth                    # pylint: disable=protected-access
+    assert p._api is api                      # pylint: disable=protected-access
+    assert not auth.staled
+
+
+def test_auth_loss_marking_waits_for_coordinator_to_actually_stop(monkeypatch):
+    # A stuck coordinator can still push stale state over the auth-required
+    # write: devices are only marked once stop() really succeeded; the next
+    # reconcile tick retries.
+    _patch(monkeypatch)
+    p = _plugin()
+    auth = _FakeAuth(STATE_AUTHORIZED)
+    p._api = object()                         # pylint: disable=protected-access
+    p._auth = auth                            # pylint: disable=protected-access
+    p._reconcile_coordinator()                # pylint: disable=protected-access
+    coord = p._coordinator                    # pylint: disable=protected-access
+    bridge = Mock()
+    p._bridges[1] = bridge                    # pylint: disable=protected-access
+
+    coord.stop = lambda timeout=5.0: False    # reader thread stuck
+    auth._state = STATE_AUTH_REQUIRED
+    p._reconcile_coordinator()                # pylint: disable=protected-access
+    bridge.mark_auth_required.assert_not_called()
+
+    coord.stop = lambda timeout=5.0: True     # next tick: stop succeeds
+    p._reconcile_coordinator()                # pylint: disable=protected-access
+    bridge.mark_auth_required.assert_called_once()

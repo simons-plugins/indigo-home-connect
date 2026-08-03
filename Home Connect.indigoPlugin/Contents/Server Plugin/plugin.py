@@ -70,6 +70,8 @@ class Plugin(indigo.PluginBase):
     def shutdown(self):
         self._stop_auth.set()
         with self._coord_lock:
+            if self._api is not None:
+                self._api.abort()     # unblock any thread waiting out the rate-limit gate
             self._stop_coordinator()
         self.logger.info("Home Connect plugin stopped")
 
@@ -100,7 +102,17 @@ class Plugin(indigo.PluginBase):
         with self._coord_lock:
             authorized = bool(self._auth) and self._auth.state() == STATE_AUTHORIZED
             if not authorized:
-                self._stop_coordinator()
+                had_coordinator = self._coordinator is not None
+                stopped = self._stop_coordinator()
+                # Auth died while devices were live: surface it on every bridged
+                # device — otherwise they freeze at their last healthy-looking
+                # state indefinitely and triggers on `connected` never fire.
+                # Only once the coordinator actually stopped: a stuck one can
+                # still push stale state over the auth-required write, and the
+                # next 60s reconcile retries this whole branch.
+                if had_coordinator and stopped and bool(self._auth) \
+                        and self._auth.state() == STATE_AUTH_REQUIRED:
+                    self._mark_devices_auth_required()
                 return
             if self._coordinator is not None and self._coordinator_api is not self._api:
                 if not self._stop_coordinator():
@@ -125,6 +137,12 @@ class Plugin(indigo.PluginBase):
                 self._coordinator_api = api
         except Exception as exc:  # pylint: disable=broad-except
             self.logger.exception(exc)
+
+    def _mark_devices_auth_required(self):
+        with self._dev_lock:
+            bridges = list(self._bridges.values())
+        for bridge in bridges:
+            bridge.mark_auth_required()
 
     def _stop_coordinator(self):
         """Stop the coordinator; return True only if it fully stopped. On a
@@ -175,8 +193,16 @@ class Plugin(indigo.PluginBase):
         client_secret = self.pluginPrefs.get("clientSecret", "").strip()
         simulator = self.pluginPrefs.get("useSimulator", False)
         with self._coord_lock:
+            if self._auth is not None and self._auth.matches(client_id, client_secret, simulator):
+                # Unchanged client: a no-op supersession. Keep the auth instance
+                # (a device-flow authorization may be pending on it — marking it
+                # stale would discard the granted token), the running stream and
+                # the controller's rate-limiter windows.
+                return
             if self._auth is not None:
                 self._auth.mark_stale()   # a late worker from the old instance must not persist
+            if self._api is not None:
+                self._api.abort()         # unblock threads stuck at the old client's gate
             # Tear down any running stream; it is bound to the old api/host. The
             # supervisor (or startup) restarts it against the rebuilt client.
             self._stop_coordinator()
@@ -204,11 +230,17 @@ class Plugin(indigo.PluginBase):
         # Stop any in-flight authorization before starting a new one.
         self._stop_auth.set()
         self._stop_auth = threading.Event()
-        if self._auth is not None:
-            self._auth.mark_stale()       # old worker must not persist a superseded result
-
-        api, auth = self._build_client(client_id, client_secret, simulator)
-        self._api, self._auth = api, auth
+        with self._coord_lock:
+            if self._auth is not None:
+                self._auth.mark_stale()   # old worker must not persist a superseded result
+            if self._api is not None:
+                self._api.abort()         # unblock threads stuck at the old client's gate
+            # Tear down a coordinator wired to the now-aborted api (parity with
+            # _rebuild_client) — left running, its reconnect loop error-spins
+            # against the dead client until the next 60s reconcile tick.
+            self._stop_coordinator()
+            api, auth = self._build_client(client_id, client_secret, simulator)
+            self._api, self._auth = api, auth
 
         try:
             if simulator:
@@ -243,6 +275,13 @@ class Plugin(indigo.PluginBase):
                 self.logger.info("Home Connect authorization cancelled")
             else:
                 self.logger.error("Home Connect authorization failed: %s", detail)
+            # A flow that ended without a token leaves the plugin unauthorized
+            # with no coordinator — the coordinator-stop marking never fires, so
+            # surface it on the devices here (only if this flow is still the
+            # live auth; a superseded worker must not stomp a newer success).
+            if status in ("denied", "expired", "error") and self._auth is auth \
+                    and auth.state() != STATE_AUTHORIZED:
+                self._mark_devices_auth_required()
 
         self._auth_thread = threading.Thread(target=_worker, name="hc-device-flow", daemon=True)
         self._auth_thread.start()
@@ -252,7 +291,10 @@ class Plugin(indigo.PluginBase):
 
     def closedPrefsConfigUi(self, valuesDict, userCancelled):  # noqa: N803
         if userCancelled:
-            self._stop_auth.set()
+            # The dialog is documented as closable while a device-flow
+            # authorization completes in the background — leave the worker
+            # running; the granted token is applied when it arrives. A new
+            # Authorize press supersedes it, and the code expires on its own.
             return
         self.debug = valuesDict.get("showDebugInfo", False)
         self._rebuild_client()
@@ -274,6 +316,12 @@ class Plugin(indigo.PluginBase):
         appliance = self._find_appliance(haid)
         if appliance is not None:
             bridge.attach(appliance)
+        elif self._auth is not None and self._auth.state() == STATE_AUTH_REQUIRED:
+            # Level-trigger, not just the coordinator-stop edge: a device
+            # created or restarted WHILE authorization is dead must show the
+            # auth error, not a benign "Waiting for appliance…" that sends the
+            # user hunting a discovery problem.
+            bridge.mark_auth_required()
         else:
             bridge.mark_waiting()
         self.logger.info("Home Connect device '%s' started (haId=%s)", dev.name, redact(haid))
@@ -646,6 +694,10 @@ def _control_error_hint(exc):
                 "and Remote Start are still enabled on the appliance, and that no one is operating "
                 "it directly")
     if exc.status == 429:
+        if exc.retry_after:
+            minutes = int(exc.retry_after // 60) + 1
+            return (f"Home Connect is rate-limiting ({exc}). Try again in about "
+                    f"{minutes} minute(s)")
         return f"Home Connect is rate-limiting ({exc}). Wait a minute, then try again"
     if exc.status == 403:
         return (f"not authorized for this action ({exc}). Re-authorize the plugin so it has the "
