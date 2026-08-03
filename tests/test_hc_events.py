@@ -1,6 +1,7 @@
 """Unit tests for hc_events.py — SSE parser, reader/reconnect, ApiReader
 swallowing, scheduler, and the coordinator."""
 import json
+import socket
 import threading
 import time
 from collections import deque
@@ -188,6 +189,46 @@ def test_event_stream_start_events_stop_on_close():
     stream = EventStream(api, dispatch=dispatch, logger=Mock(), sleep=clock.sleep)
     stream.run(stop)
     assert dispatched == [START, STATUS, STOP]
+
+
+def test_event_stream_shutdown_error_logs_debug_not_warning():
+    # A read failure while stop_event is set is a deliberate shutdown (stop()
+    # closed the socket under the blocked read): it must log at debug, never warn.
+    transport = ScriptedTransport()
+    transport.queue_stream(200, HC_JSON, [b"event:STATUS\n", socket.timeout("closed")])
+    clock = Clock()
+    api = make_api(transport, clock)
+    logger = Mock()
+    stop = threading.Event()
+
+    def dispatch(event):
+        if event.event == START:
+            stop.set()          # simulate stop() arriving mid-stream
+
+    EventStream(api, dispatch=dispatch, logger=logger, sleep=clock.sleep).run(stop)
+    warnings = " ".join(str(c) for c in logger.warning.call_args_list)
+    debugs = " ".join(str(c) for c in logger.debug.call_args_list)
+    assert "event stream ended" not in warnings          # not warned during shutdown
+    assert "closed for shutdown" in debugs
+
+
+def test_event_stream_error_warns_when_not_stopping():
+    # The same read failure with stop_event NOT set is a real drop -> warn.
+    transport = ScriptedTransport()
+    transport.queue_stream(200, HC_JSON, [b"event:STATUS\n", socket.timeout("dropped")])
+    clock = Clock()
+    api = make_api(transport, clock)
+    logger = Mock()
+    stop = threading.Event()
+
+    def dispatch(event):
+        if event.event == STOP:
+            stop.set()          # let the loop exit after the first failed run
+        return
+
+    EventStream(api, dispatch=dispatch, logger=logger, sleep=clock.sleep).run(stop)
+    warnings = " ".join(str(c) for c in logger.warning.call_args_list)
+    assert "event stream ended" in warnings
 
 
 def test_event_stream_filters_keep_alive():

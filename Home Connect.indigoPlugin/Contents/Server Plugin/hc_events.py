@@ -212,7 +212,13 @@ class EventStream:
                     self._dispatch(event)
             except HomeConnectError as exc:
                 error = exc
-                self._logger.warning("Home Connect event stream ended: %s", exc)
+                if stop_event.is_set():
+                    # Deliberate shutdown: stop() closed the socket out from under
+                    # the blocked read, so this failure is expected — not a warning.
+                    self._logger.debug("Home Connect event stream closed for shutdown: %s", exc)
+                else:
+                    self._logger.warning("Home Connect event stream ended: %s — "
+                                         "will reconnect automatically", exc)
             except Exception as exc:  # pylint: disable=broad-except
                 error = exc
                 self._logger.exception(exc)
