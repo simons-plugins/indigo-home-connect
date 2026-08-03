@@ -252,3 +252,56 @@ def test_no_retry_start_401_without_handler_raises_once():
     with pytest.raises(HomeConnectError):
         api.put_json("/api/homeappliances/x/programs/active", {"data": {}}, no_retry=True)
     assert len(transport.requests) == 1     # no handler -> no resend
+
+
+# -- Red-team wave 1 (#8 gate abort, #11 headerless 429, #13 retry backoff) ---
+
+def test_headerless_429_applies_default_gate():
+    # BSH's non-time-based limits return 429 with NO Retry-After; a synthetic
+    # gate delay must still apply or an error loop hammers the API.
+    transport = ScriptedTransport()
+    transport.queue(429, {"content-type": "application/json"}, "{}")
+    transport.queue(200, HC_JSON, json.dumps({"data": {}}))
+    clock = Clock()
+    api = make_api(transport, clock=clock)
+    api.get_json("/api/homeappliances")
+    assert hc_api.DEFAULT_RETRY_AFTER in clock.slept
+
+
+def test_abort_raises_instead_of_waiting_out_gate():
+    transport = ScriptedTransport()
+    transport.queue(429, {"content-type": "application/json", "retry-after": "3600"}, "{}")
+    clock = Clock()
+    api = make_api(transport, clock=clock, max_retries=0)
+    with pytest.raises(HomeConnectError):
+        api.get_json("/api/homeappliances")          # sets the gate 1h out
+    api.abort()
+    with pytest.raises(HomeConnectError) as exc:
+        api.get_json("/api/homeappliances")          # must NOT sleep 3600s
+    assert "abandoned" in str(exc.value)
+    assert 3600 not in clock.slept
+
+
+def test_gate_wait_remaining_reports_window():
+    transport = ScriptedTransport()
+    transport.queue(429, {"content-type": "application/json", "retry-after": "300"}, "{}")
+    clock = Clock()
+    api = make_api(transport, clock=clock, max_retries=0)
+    assert api.gate_wait_remaining() == 0.0
+    with pytest.raises(HomeConnectError):
+        api.get_json("/api/homeappliances")
+    assert api.gate_wait_remaining() == 300.0
+
+
+def test_retry_backoff_between_5xx_attempts():
+    # Back-to-back retries feed the 10-successive-errors block: each retry must
+    # wait, doubling per attempt.
+    transport = ScriptedTransport()
+    transport.queue(500, HC_JSON, "{}")
+    transport.queue(500, HC_JSON, "{}")
+    transport.queue(200, HC_JSON, json.dumps({"data": {}}))
+    clock = Clock()
+    api = make_api(transport, clock=clock)
+    api.get_json("/api/homeappliances")
+    assert clock.slept == [2.0, 4.0]
+    assert len(transport.requests) == 3

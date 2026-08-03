@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import socket
+import threading
 import time
 import urllib.parse
 from datetime import datetime, timezone
@@ -40,6 +41,19 @@ BUDGET_WARN_AT = 800
 
 DEFAULT_TIMEOUT = 30
 DEFAULT_MAX_RETRIES = 3
+
+# A 429 with no Retry-After header is real (BSH's non-time-based limits — the
+# 10-channel cap, the OAuth limits — return a bare Too Many Requests): apply a
+# synthetic gate delay so an error loop can never hammer the API.
+DEFAULT_RETRY_AFTER = 60
+
+# Base delay between retry attempts for transport/5xx failures, doubling per
+# attempt. 429 is excluded — the request gate already enforces Retry-After.
+# Back-to-back retries feed BSH's 10-successive-errors-per-10-min block.
+RETRY_BACKOFF_BASE = 2.0
+
+# While waiting out the gate, wake this often to notice abort()/shutdown.
+_GATE_WAIT_SLICE = 1.0
 
 # BSH returns localized program/option/setting display ``name``s keyed off the
 # request's Accept-Language. No config UI for it (PRD keeps auth-only prefs); a
@@ -164,8 +178,11 @@ class HomeConnectAPI:
 
     def __init__(self, host, logger=None, connection_factory=None, user_agent="indigo-home-connect",
                  timeout=DEFAULT_TIMEOUT, max_retries=DEFAULT_MAX_RETRIES,
-                 monotonic=time.monotonic, sleep=time.sleep,
+                 monotonic=time.monotonic, sleep=None,
                  wall_now=lambda: datetime.now(timezone.utc)):
+        # ``sleep`` is a test seam: when injected, gate/backoff waits call it with
+        # the whole delay (a fake clock jumps forward). In production it stays
+        # None and waits use the abort event, so shutdown interrupts them.
         self._host = host
         self._logger = logger or logging.getLogger("hc_api")
         self._connection_factory = connection_factory or _default_connection_factory
@@ -179,6 +196,10 @@ class HomeConnectAPI:
         # Request gate: the earliest monotonic time the next request may issue.
         self._earliest_retry = 0.0
         self._gate_logged = False
+        # Set once when this client is superseded or the plugin shuts down; any
+        # thread waiting out the gate (or a retry backoff) raises promptly
+        # instead of finishing a Retry-After that can run to hours.
+        self._abort = threading.Event()
 
         # Daily budget counter (resets at midnight UTC).
         self._counter_date = None
@@ -194,6 +215,19 @@ class HomeConnectAPI:
     @property
     def host(self):
         return self._host
+
+    def abort(self):
+        """Permanently unblock this client's gate/backoff waits (plugin shutdown
+        or a prefs rebuild superseding this client). Waiting threads raise a
+        :class:`HomeConnectError` instead of sleeping out the Retry-After."""
+        self._abort.set()
+
+    def gate_wait_remaining(self):
+        """Seconds until the request gate opens (0.0 when it is open now).
+
+        Lets UI-path callers refuse fast ("rate limited — try later") instead of
+        blocking an Indigo thread behind a Retry-After that can run to hours."""
+        return max(0.0, self._earliest_retry - self._monotonic())
 
     def set_token_provider(self, provider):
         """``provider()`` returns the current bearer access token (or ``None``)."""
@@ -247,6 +281,7 @@ class HomeConnectAPI:
                 raw = self._perform(method, path, headers, body, accept, authorize)
             except HomeConnectError:
                 if self._can_retry(None, retryable, attempt):
+                    self._backoff_before_retry(attempt)
                     attempt += 1
                     continue
                 raise
@@ -268,13 +303,15 @@ class HomeConnectAPI:
                     continue
 
             if self._can_retry(raw.status, retryable, attempt):
+                if raw.status != 429:         # a 429 retry waits at the gate instead
+                    self._backoff_before_retry(attempt)
                 attempt += 1
                 continue
             raise err
 
     # -- Streaming (SSE) -----------------------------------------------------
     def open_stream(self, path, *, accept=SSE_CONTENT_TYPE, read_timeout=STREAM_READ_TIMEOUT,
-                    authorize=True):
+                    authorize=True, abort_check=None):
         """Open a long-lived streaming GET and return a :class:`StreamResponse`.
 
         Goes through the shared request gate (so a 429 ``Retry-After`` from a
@@ -288,7 +325,7 @@ class HomeConnectAPI:
         """
         unauthorized_retried = False
         while True:
-            self._wait_for_gate()
+            self._wait_for_gate(abort_check)
             conn = self._connection_factory(self._host, read_timeout)
             req_headers = {"Accept": accept, "User-Agent": self._user_agent,
                            "Cache-Control": "no-cache"}
@@ -368,20 +405,39 @@ class HomeConnectAPI:
                 pass
         return RawResponse(status, resp_headers, resp_body)
 
-    def _wait_for_gate(self):
-        delay = self._earliest_retry - self._monotonic()
-        if delay > 0:
+    def _wait_for_gate(self, abort_check=None):
+        while True:
+            delay = self._earliest_retry - self._monotonic()
+            if delay <= 0:
+                break
+            if self._abort.is_set() or (abort_check is not None and abort_check()):
+                raise HomeConnectError(
+                    f"request abandoned while rate-limited ({delay:.0f}s of Retry-After remaining)")
             if not self._gate_logged:
                 self._logger.warning("Home Connect rate limit: waiting %.1fs before next request", delay)
                 self._gate_logged = True
+            if self._sleep is not None:
+                self._sleep(delay)            # injected test clock jumps the whole delay
+            else:
+                self._abort.wait(min(delay, _GATE_WAIT_SLICE))
+        self._gate_logged = False
+
+    def _backoff_before_retry(self, attempt):
+        """Wait (interruptibly) before a transport/5xx retry so a struggling
+        endpoint is never hit back-to-back."""
+        delay = RETRY_BACKOFF_BASE * (2 ** attempt)
+        if self._sleep is not None:
             self._sleep(delay)
         else:
-            self._gate_logged = False
+            self._abort.wait(delay)
+        if self._abort.is_set():
+            raise HomeConnectError("request abandoned during retry backoff")
 
     def _apply_retry_after(self, raw):
         seconds = self._parse_retry_after(raw)
-        if seconds is not None:
-            self._earliest_retry = max(self._earliest_retry, self._monotonic() + seconds)
+        if seconds is None:
+            seconds = DEFAULT_RETRY_AFTER     # headerless 429 (non-time-based limit)
+        self._earliest_retry = max(self._earliest_retry, self._monotonic() + seconds)
 
     @staticmethod
     def _parse_retry_after(raw):
