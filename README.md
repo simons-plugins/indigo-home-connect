@@ -176,12 +176,12 @@ request budget.
 |---|---|---|
 | **Start Program** | Starts a program now | Connected · Remote Control on · Remote Start allowed · not locally controlled · `operationState = Ready` |
 | **Select Program** | Stages a program without starting | Connected · powered on |
-| **Stop Program** | Aborts the active program | Connected · a program is running |
+| **Stop Program** | Aborts the active program | Connected · a program is active or paused |
 | **Pause Program** | Pauses (if supported) | Connected · appliance exposes the Pause command |
 | **Resume Program** | Resumes a paused program | Connected · appliance exposes the Resume command |
 | **Send Command** | Sends a supported command (e.g. *Open Door*, *Partly Open Door*) | Connected · command is in the appliance's command list |
-| **Set Power State** | On / Off / Standby | Connected · value is in the appliance's allowed power states |
-| **Set Setting (advanced)** | Writes any BSH setting key (e.g. `BSH.Common.Setting.ChildLock`) | Connected · appliance accepts the key/value |
+| **Set Power State** | On / Off / Standby | Connected · value is in the appliance's allowed power states (when known) |
+| **Set Setting (advanced)** | Writes any BSH setting key (e.g. `BSH.Common.Setting.ChildLock`) | Connected · a setting key is given (the appliance validates the key/value) |
 
 **Start / Select** dialogs offer a **Program** menu (built from the appliance's full
 program list) and an optional **Option overrides** field — one `key=value` per line, e.g.
@@ -282,7 +282,9 @@ The plugin's error message names the concrete next step; follow it, then retry.
 **"Authorization required" appears / control stops working.**
 The refresh token was revoked or went **unused for more than 60 days** (e.g. the plugin
 was disabled over a long holiday). Re-open **Configure…** and press **Authorize** again to
-mint fresh tokens. Devices flag this state rather than silently failing.
+mint fresh tokens. The Event Log carries the "authorization lost" error and the
+Configure… dialog's status line shows *Authorization required*; device state stops
+updating until you re-authorize.
 
 **No appliances in the picker.**
 Confirm the appliances are paired in the Home Connect **phone app**, that authorization
@@ -314,7 +316,7 @@ further: <https://homeconnect.thouky.co.uk>.
   capability cache, and local pre-flight checks — all to live within the 1000/day budget.
 - **Stdlib only** — no bundled dependencies, so nothing to `pip install` on the Indigo
   server. Tokens live in a `0600` JSON file under Indigo's Preferences (not in plugin
-  prefs), and tokens/appliance IDs are redacted in all log output.
+  prefs), and tokens/appliance IDs are redacted in log output.
 
 ## Acknowledgments
 

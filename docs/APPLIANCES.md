@@ -18,8 +18,9 @@ expose more or less than the notes below.
 | Fridge Freezer | Simulator-validated |
 | Home Connect Appliance (generic) | Simulator-validated |
 
-Common to **all** types: the 15 common states (see the README) and the state-scoped actions
-that only need *connected* (Stop, Pause/Resume where supported, Send Command, Set Setting).
+Common to **all** types: the common state set (see the README) and the state-scoped
+actions gated on connectivity plus their own preconditions (Stop needs an active or
+paused program; Pause/Resume/Send Command need the appliance to expose the command).
 "Programs" and "Remote start" columns below note what is type-specific.
 
 ---
@@ -105,5 +106,7 @@ The plugin never hard-codes an appliance's abilities. On demand (and cached 24 h
   power values this unit permits (this is how the dryer's read-only `On` is discovered).
 
 If a live read fails, the last cached value is used, so a brief cloud blip does not empty
-your menus. See the PRD (`docs/plans/PRD-indigo-home-connect.md` §3.6) for the rationale.
+your menus. Capabilities are detected empirically rather than assumed from the appliance
+type because appliances of the same type vary by model — the API's own constraint data
+(`allowedvalues`, the command list, the program list) is the only reliable source.
 </content>
