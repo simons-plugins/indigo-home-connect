@@ -65,3 +65,15 @@ def test_cancel_close_leaves_device_flow_worker_running(monkeypatch):
     stop_event = p._stop_auth               # pylint: disable=protected-access
     p.closedPrefsConfigUi({}, userCancelled=True)
     assert not stop_event.is_set()
+
+
+def test_authorize_press_aborts_superseded_api(monkeypatch):
+    # A thread waiting out the old client's rate-limit gate must be unblocked
+    # when the user re-authorizes, same as a prefs-change rebuild.
+    from unittest.mock import Mock
+    p = _plugin()
+    old_api = Mock()
+    p._api = old_api                        # pylint: disable=protected-access
+    monkeypatch.setattr(p, "_build_client", lambda cid, sec, sim: (object(), _FakeAuthDeviceFlow()))
+    p.authorizeButtonPressed({"clientId": "abc", "useSimulator": False})
+    old_api.abort.assert_called_once()

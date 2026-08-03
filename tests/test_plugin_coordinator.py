@@ -147,3 +147,27 @@ def test_rebuild_with_unchanged_client_is_noop_supersession():
     assert p._auth is auth                    # pylint: disable=protected-access
     assert p._api is api                      # pylint: disable=protected-access
     assert not auth.staled
+
+
+def test_auth_loss_marking_waits_for_coordinator_to_actually_stop(monkeypatch):
+    # A stuck coordinator can still push stale state over the auth-required
+    # write: devices are only marked once stop() really succeeded; the next
+    # reconcile tick retries.
+    _patch(monkeypatch)
+    p = _plugin()
+    auth = _FakeAuth(STATE_AUTHORIZED)
+    p._api = object()                         # pylint: disable=protected-access
+    p._auth = auth                            # pylint: disable=protected-access
+    p._reconcile_coordinator()                # pylint: disable=protected-access
+    coord = p._coordinator                    # pylint: disable=protected-access
+    bridge = Mock()
+    p._bridges[1] = bridge                    # pylint: disable=protected-access
+
+    coord.stop = lambda timeout=5.0: False    # reader thread stuck
+    auth._state = STATE_AUTH_REQUIRED
+    p._reconcile_coordinator()                # pylint: disable=protected-access
+    bridge.mark_auth_required.assert_not_called()
+
+    coord.stop = lambda timeout=5.0: True     # next tick: stop succeeds
+    p._reconcile_coordinator()                # pylint: disable=protected-access
+    bridge.mark_auth_required.assert_called_once()

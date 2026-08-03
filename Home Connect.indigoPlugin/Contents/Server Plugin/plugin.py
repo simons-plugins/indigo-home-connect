@@ -103,11 +103,14 @@ class Plugin(indigo.PluginBase):
             authorized = bool(self._auth) and self._auth.state() == STATE_AUTHORIZED
             if not authorized:
                 had_coordinator = self._coordinator is not None
-                self._stop_coordinator()
+                stopped = self._stop_coordinator()
                 # Auth died while devices were live: surface it on every bridged
                 # device — otherwise they freeze at their last healthy-looking
                 # state indefinitely and triggers on `connected` never fire.
-                if had_coordinator and bool(self._auth) \
+                # Only once the coordinator actually stopped: a stuck one can
+                # still push stale state over the auth-required write, and the
+                # next 60s reconcile retries this whole branch.
+                if had_coordinator and stopped and bool(self._auth) \
                         and self._auth.state() == STATE_AUTH_REQUIRED:
                     self._mark_devices_auth_required()
                 return
@@ -230,6 +233,8 @@ class Plugin(indigo.PluginBase):
         with self._coord_lock:
             if self._auth is not None:
                 self._auth.mark_stale()   # old worker must not persist a superseded result
+            if self._api is not None:
+                self._api.abort()         # unblock threads stuck at the old client's gate
             api, auth = self._build_client(client_id, client_secret, simulator)
             self._api, self._auth = api, auth
 

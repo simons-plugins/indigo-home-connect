@@ -406,21 +406,26 @@ class HomeConnectAPI:
         return RawResponse(status, resp_headers, resp_body)
 
     def _wait_for_gate(self, abort_check=None):
-        while True:
-            delay = self._earliest_retry - self._monotonic()
-            if delay <= 0:
-                break
-            if self._abort.is_set() or (abort_check is not None and abort_check()):
-                raise HomeConnectError(
-                    f"request abandoned while rate-limited ({delay:.0f}s of Retry-After remaining)")
-            if not self._gate_logged:
-                self._logger.warning("Home Connect rate limit: waiting %.1fs before next request", delay)
-                self._gate_logged = True
-            if self._sleep is not None:
-                self._sleep(delay)            # injected test clock jumps the whole delay
-            else:
-                self._abort.wait(min(delay, _GATE_WAIT_SLICE))
-        self._gate_logged = False
+        try:
+            while True:
+                delay = self._earliest_retry - self._monotonic()
+                if delay <= 0:
+                    break
+                if self._abort.is_set() or (abort_check is not None and abort_check()):
+                    raise HomeConnectError(
+                        f"request abandoned while rate-limited ({delay:.0f}s of Retry-After remaining)")
+                if not self._gate_logged:
+                    self._logger.warning("Home Connect rate limit: waiting %.1fs before next request",
+                                         delay)
+                    self._gate_logged = True
+                if self._sleep is not None:
+                    self._sleep(delay)        # injected test clock jumps the whole delay
+                else:
+                    self._abort.wait(min(delay, _GATE_WAIT_SLICE))
+        finally:
+            # Reset on the abandoned path too: an abort_check exit (stream stop)
+            # must not permanently suppress the warning for this client.
+            self._gate_logged = False
 
     def _backoff_before_retry(self, attempt):
         """Wait (interruptibly) before a transport/5xx retry so a struggling

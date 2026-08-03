@@ -223,6 +223,11 @@ class EventStream:
                                                abort_check=stop_event.is_set)
                 with self._current_lock:
                     self._current = stream
+                # A stop() racing the open-to-register gap closed a _current that
+                # was still None; re-check so the reader never enters lines() on
+                # a stream shutdown can no longer reach.
+                if stop_event.is_set():
+                    raise HomeConnectError("stream opened during shutdown")
                 self._logger.info("Home Connect event stream connected")
                 opened_at = self._monotonic()
                 self._dispatch(SseEvent(START))

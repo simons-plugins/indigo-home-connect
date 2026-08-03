@@ -532,3 +532,33 @@ def test_event_stream_short_lived_connects_count_toward_escalation():
                 escalate_after=3, reconnect_extended=900.0,
                 monotonic=lambda: 0.0).run(stop)   # frozen clock: lived == 0 < stable
     assert sleeps[-1] == 900.0
+
+
+def test_event_stream_closes_stream_when_shutdown_wins_open_race():
+    # stop() racing the open-to-register gap closes a _current that is still
+    # None; the reader must notice and close the fresh stream instead of
+    # entering lines() on a stream shutdown can no longer reach.
+    stop = threading.Event()
+
+    class _RaceStream:
+        def __init__(self):
+            self.closed = False
+
+        def lines(self):
+            raise AssertionError("reader must never read a post-shutdown stream")
+
+        def close(self):
+            self.closed = True
+
+    race_stream = _RaceStream()
+
+    class _RaceApi:
+        def open_stream(self, path, read_timeout=None, abort_check=None):  # noqa: ARG002
+            stop.set()                     # shutdown lands between open and register
+            return race_stream
+
+    dispatched = []
+    EventStream(_RaceApi(), dispatch=lambda e: dispatched.append(e.event),
+                logger=Mock(), sleep=lambda s: None).run(stop)
+    assert race_stream.closed
+    assert START not in dispatched         # never claimed to be connected
