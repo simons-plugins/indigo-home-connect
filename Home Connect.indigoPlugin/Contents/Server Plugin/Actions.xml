@@ -1,5 +1,104 @@
 <?xml version="1.0"?>
-<!-- Actions arrive in Phase 4: start/stop/pause/resume/select program,
-     power, set setting, send command. -->
+<!-- Phase 4 control actions. Every action is device-scoped via deviceFilter="self"
+     (all seven Home Connect device types) — a single filter value, because a
+     comma list silently yields an empty picker. The selected device arrives in
+     the callback as `dev` and, inside the ConfigUI dynamic menus, as `targetId`
+     (the object being edited; valuesDict["deviceId"] is only a defensive
+     fallback). All guard rails live in hc_control; the callbacks here just
+     resolve the appliance and dispatch. -->
 <Actions>
+	<SupportURL>https://github.com/simons-plugins/indigo-home-connect</SupportURL>
+
+	<Action id="startProgram" deviceFilter="self">
+		<Name>Start Program</Name>
+		<CallbackMethod>startProgram</CallbackMethod>
+		<ConfigUI>
+			<Field id="program" type="menu">
+				<Label>Program:</Label>
+				<List class="self" method="programListForDevice" dynamicReload="true"/>
+			</Field>
+			<Field id="optionOverrides" type="textfield">
+				<Label>Option overrides:</Label>
+			</Field>
+			<Field id="optionsHelp" type="label" fontSize="small" alignWithControl="true">
+				<Label>Optional. One key=value per line, e.g. BSH.Common.Option.StartInRelative=3600. Values coerce to true/false (bool), whole numbers (int), otherwise text. Leave blank to start with the program's defaults. Requires Remote Start enabled on the appliance and OperationState = Ready.</Label>
+			</Field>
+		</ConfigUI>
+	</Action>
+
+	<Action id="selectProgram" deviceFilter="self">
+		<Name>Select Program</Name>
+		<CallbackMethod>selectProgram</CallbackMethod>
+		<ConfigUI>
+			<Field id="program" type="menu">
+				<Label>Program:</Label>
+				<List class="self" method="programListForDevice" dynamicReload="true"/>
+			</Field>
+			<Field id="optionOverrides" type="textfield">
+				<Label>Option overrides:</Label>
+			</Field>
+			<Field id="optionsHelp" type="label" fontSize="small" alignWithControl="true">
+				<Label>Optional. One key=value per line (see Start Program). Select only stages the program; it does not need Remote Start, but the appliance must be on.</Label>
+			</Field>
+		</ConfigUI>
+	</Action>
+
+	<Action id="stopProgram" deviceFilter="self">
+		<Name>Stop Program</Name>
+		<CallbackMethod>stopProgram</CallbackMethod>
+	</Action>
+
+	<Action id="pauseProgram" deviceFilter="self">
+		<Name>Pause Program</Name>
+		<CallbackMethod>pauseProgram</CallbackMethod>
+	</Action>
+
+	<Action id="resumeProgram" deviceFilter="self">
+		<Name>Resume Program</Name>
+		<CallbackMethod>resumeProgram</CallbackMethod>
+	</Action>
+
+	<Action id="sendCommand" deviceFilter="self">
+		<Name>Send Command</Name>
+		<CallbackMethod>sendCommand</CallbackMethod>
+		<ConfigUI>
+			<Field id="command" type="menu">
+				<Label>Command:</Label>
+				<List class="self" method="commandListForDevice" dynamicReload="true"/>
+			</Field>
+			<Field id="commandHelp" type="label" fontSize="small" alignWithControl="true">
+				<Label>Only commands the selected appliance actually supports are listed (e.g. Open Door, Partly Open Door). An empty list means the appliance exposes no commands.</Label>
+			</Field>
+		</ConfigUI>
+	</Action>
+
+	<Action id="setPowerState" deviceFilter="self">
+		<Name>Set Power State</Name>
+		<CallbackMethod>setPowerState</CallbackMethod>
+		<ConfigUI>
+			<Field id="powerState" type="menu">
+				<Label>Power state:</Label>
+				<List class="self" method="powerStateListForDevice" dynamicReload="true"/>
+			</Field>
+			<Field id="powerHelp" type="label" fontSize="small" alignWithControl="true">
+				<Label>Only the values the appliance allows are listed. Some appliances (e.g. tumble dryers) expose power as read-only On — those offer no Off/Standby.</Label>
+			</Field>
+		</ConfigUI>
+	</Action>
+
+	<Action id="setSetting" deviceFilter="self">
+		<Name>Set Setting (advanced)</Name>
+		<CallbackMethod>setSetting</CallbackMethod>
+		<ConfigUI>
+			<Field id="settingKey" type="textfield">
+				<Label>Setting key:</Label>
+			</Field>
+			<Field id="settingValue" type="textfield">
+				<Label>Value:</Label>
+			</Field>
+			<Field id="settingHelp" type="label" fontSize="small" alignWithControl="true">
+				<Label>Advanced. Full BSH setting key, e.g. BSH.Common.Setting.ChildLock. The value coerces to true/false (bool), a whole number (int), otherwise text. The appliance rejects unknown or read-only settings.</Label>
+			</Field>
+		</ConfigUI>
+	</Action>
 </Actions>

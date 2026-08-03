@@ -3,6 +3,9 @@
 *.tokens.json
 .live_tokens.json
 
+# Local live-check working files
+.live_capabilities.json
+
 # Python
 __pycache__/
 *.pyc
