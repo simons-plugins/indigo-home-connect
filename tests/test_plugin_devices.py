@@ -258,3 +258,20 @@ def test_comm_property_change_ignores_other_props():
     new = _device(10, "dishwasher", "HA-1")
     new.pluginProps["somethingElse"] = "changed"
     assert p.didDeviceCommPropertyChange(old, new) is False
+
+
+def test_device_start_marks_auth_required_when_auth_dead():
+    # Level-trigger: a device created or restarted WHILE authorization is dead
+    # must show the auth error, not a benign "Waiting for appliance…".
+    p = _plugin()
+    p._coordinator = None
+
+    class _DeadAuth:
+        def state(self):
+            return plugin.STATE_AUTH_REQUIRED
+
+    p._auth = _DeadAuth()
+    dev = _device(9, "dishwasher", "HA-X")
+    p.deviceStartComm(dev)
+    assert dev.states["status"] == "Authorization required"
+    assert dev.error_state == "Authorization required"

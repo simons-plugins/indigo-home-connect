@@ -409,11 +409,17 @@ class HomeConnectAuth:
     def refresh_if_needed(self, force=False):
         """Refresh the access token if it is within :data:`REFRESH_WINDOW` of
         expiry (or ``force``). Honors the minimum refresh interval and any
-        ``Retry-After`` backoff. Concurrent callers collapse to one HTTP refresh.
-        Returns True if the current token is fresh afterwards."""
+        active backoff — a 429 ``Retry-After`` or the exponential backoff after
+        repeated generic failures. Defers (returns False) while the shared
+        request gate is closed: a token POST would otherwise block the caller —
+        the plugin's supervisor thread — for the whole Retry-After. Concurrent
+        callers collapse to one HTTP refresh. Returns True if the current token
+        is fresh afterwards."""
         entry = self._store.get(self._client_id)
         if not entry:
             return False
+        if self._api.gate_wait_remaining() > 0:
+            return False              # gate closed: retried on a later tick
         with self._lock:
             if self._state == STATE_AUTH_REQUIRED:
                 return False              # dead refresh token: re-auth required, don't resubmit

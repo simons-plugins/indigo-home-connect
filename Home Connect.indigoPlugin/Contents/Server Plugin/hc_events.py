@@ -10,7 +10,9 @@ daily-budget request). This module:
   stray HTTP headers, restarts the stream on structurally unparseable input;
 * runs an infinite reconnect loop with a 120 s read timeout (dead-stream
   detection) and synthetic START/STOP events to the appliance handlers, honoring
-  a 429 ``Retry-After`` through ``hc_api``'s shared request gate;
+  a 429 ``Retry-After`` through ``hc_api``'s shared request gate, with backoff
+  escalating to 15 min after sustained failures (every open is a counted
+  request);
 * routes wire events (STATUS/EVENT/NOTIFY/CONNECTED/DISCONNECTED/PAIRED/DEPAIRED)
   to the right :class:`~hc_appliance.HomeConnectAppliance`;
 * discovers appliances at most hourly and runs each appliance's sequential
@@ -223,11 +225,12 @@ class EventStream:
                                                abort_check=stop_event.is_set)
                 with self._current_lock:
                     self._current = stream
-                # A stop() racing the open-to-register gap closed a _current that
-                # was still None; re-check so the reader never enters lines() on
-                # a stream shutdown can no longer reach.
+                # A coordinator stop() racing the open-to-register gap would
+                # have closed a _current that was still None; re-check so the
+                # reader never enters lines() on a stream that shutdown can no
+                # longer reach.
                 if stop_event.is_set():
-                    raise HomeConnectError("stream opened during shutdown")
+                    raise HomeConnectError("stream opened during shutdown", aborted=True)
                 self._logger.info("Home Connect event stream connected")
                 opened_at = self._monotonic()
                 self._dispatch(SseEvent(START))
@@ -238,9 +241,10 @@ class EventStream:
                     self._dispatch(event)
             except HomeConnectError as exc:
                 error = exc
-                if stop_event.is_set():
-                    # Deliberate shutdown: stop() closed the socket out from under
-                    # the blocked read, so this failure is expected — not a warning.
+                if stop_event.is_set() or exc.aborted:
+                    # Deliberate teardown: stop() closed the socket under the
+                    # blocked read, or abort() fired just before the stop event
+                    # was set — expected either way, not a warning.
                     self._logger.debug("Home Connect event stream closed for shutdown: %s", exc)
                 else:
                     self._logger.warning("Home Connect event stream ended: %s — "

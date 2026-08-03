@@ -77,3 +77,53 @@ def test_authorize_press_aborts_superseded_api(monkeypatch):
     monkeypatch.setattr(p, "_build_client", lambda cid, sec, sim: (object(), _FakeAuthDeviceFlow()))
     p.authorizeButtonPressed({"clientId": "abc", "useSimulator": False})
     old_api.abort.assert_called_once()
+
+
+def test_authorize_press_stops_coordinator_wired_to_old_api(monkeypatch):
+    # Aborting the old api without stopping its coordinator leaves the stream
+    # loop error-spinning against a dead client (false "failing repeatedly /
+    # slowing reconnects" warnings) until the next reconcile tick.
+    from unittest.mock import Mock
+    p = _plugin()
+    coordinator = Mock()
+    coordinator.stop.return_value = True
+    p._coordinator = coordinator
+    p._coordinator_api = object()
+    p._api = Mock()
+    monkeypatch.setattr(p, "_build_client", lambda cid, sec, sim: (object(), _FakeAuthDeviceFlow()))
+    p.authorizeButtonPressed({"clientId": "abc", "useSimulator": False})
+    coordinator.stop.assert_called_once()
+    assert p._coordinator is None
+
+
+def test_failed_device_flow_marks_devices_auth_required(monkeypatch):
+    # A flow ending denied/expired leaves no coordinator for the stop-edge
+    # marking to fire from — the worker itself must surface it on the devices.
+    from unittest.mock import Mock
+    import plugin as plugin_mod
+
+    class _DeniedAuth(_FakeAuthDeviceFlow):
+        def run_device_flow(self, should_stop=None):
+            return ("denied", "user said no")
+
+        def state(self):
+            return plugin_mod.STATE_UNAUTHORIZED
+
+    p = _plugin()
+    bridge = Mock()
+    p._bridges[5] = bridge
+    monkeypatch.setattr(p, "_build_client", lambda cid, sec, sim: (object(), _DeniedAuth()))
+    p.authorizeButtonPressed({"clientId": "abc", "useSimulator": False})
+    p._auth_thread.join(timeout=2)
+    bridge.mark_auth_required.assert_called_once()
+
+
+def test_shutdown_aborts_api():
+    # A regression here means a worker blocked at the gate keeps looping for up
+    # to the full Retry-After and plugin restart hangs the Indigo host.
+    from unittest.mock import Mock
+    p = _plugin()
+    api = Mock()
+    p._api = api
+    p.shutdown()
+    api.abort.assert_called_once()

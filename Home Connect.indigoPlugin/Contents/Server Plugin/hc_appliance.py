@@ -200,7 +200,9 @@ class HomeConnectAppliance:
 
     # -- Connection lifecycle -----------------------------------------------
     def on_stream_start(self):
-        """Synthetic START: cancel any pending disconnect and re-read state."""
+        """Synthetic START: cancel any pending disconnect and re-read state
+        (the read is skipped when the last full pass is within the 5-min
+        freshness window)."""
         with self._lock:
             self._disconnect_gen += 1         # supersede a scheduled disconnect
         self._schedule_read()
@@ -221,7 +223,9 @@ class HomeConnectAppliance:
         self._set_connected(False)
 
     def on_connected(self):
-        """CONNECTED wire event: mark reachable and re-read state."""
+        """CONNECTED wire event: mark reachable and re-read state (the read is
+        skipped when the last full pass is within the freshness window — a
+        flapping appliance must not cost a 5-GET pass per flap)."""
         self._set_connected(True)
 
     def on_disconnected(self):
@@ -291,6 +295,16 @@ class HomeConnectAppliance:
             self._set_connected(True)
 
     def _on_read_error(self, action, exc):
+        if getattr(exc, "aborted", False):
+            # The client was aborted (shutdown / superseded on re-authorize):
+            # nothing actually failed and no retry will run — a warning that
+            # says "retrying in Ns" here would be false twice over.
+            with self._lock:
+                self._read_actions = None
+                self._read_scheduled = False
+            self._logger.debug("Home Connect %s: '%s' read abandoned (client shutting down)",
+                               self.name, action)
+            return
         with self._lock:
             if not self._state.get(CONNECTED) or self._read_actions is None:
                 self._read_actions = None

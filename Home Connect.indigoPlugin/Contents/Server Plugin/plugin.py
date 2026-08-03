@@ -235,6 +235,10 @@ class Plugin(indigo.PluginBase):
                 self._auth.mark_stale()   # old worker must not persist a superseded result
             if self._api is not None:
                 self._api.abort()         # unblock threads stuck at the old client's gate
+            # Tear down a coordinator wired to the now-aborted api (parity with
+            # _rebuild_client) — left running, its reconnect loop error-spins
+            # against the dead client until the next 60s reconcile tick.
+            self._stop_coordinator()
             api, auth = self._build_client(client_id, client_secret, simulator)
             self._api, self._auth = api, auth
 
@@ -271,6 +275,13 @@ class Plugin(indigo.PluginBase):
                 self.logger.info("Home Connect authorization cancelled")
             else:
                 self.logger.error("Home Connect authorization failed: %s", detail)
+            # A flow that ended without a token leaves the plugin unauthorized
+            # with no coordinator — the coordinator-stop marking never fires, so
+            # surface it on the devices here (only if this flow is still the
+            # live auth; a superseded worker must not stomp a newer success).
+            if status in ("denied", "expired", "error") and self._auth is auth \
+                    and auth.state() != STATE_AUTHORIZED:
+                self._mark_devices_auth_required()
 
         self._auth_thread = threading.Thread(target=_worker, name="hc-device-flow", daemon=True)
         self._auth_thread.start()
@@ -305,6 +316,12 @@ class Plugin(indigo.PluginBase):
         appliance = self._find_appliance(haid)
         if appliance is not None:
             bridge.attach(appliance)
+        elif self._auth is not None and self._auth.state() == STATE_AUTH_REQUIRED:
+            # Level-trigger, not just the coordinator-stop edge: a device
+            # created or restarted WHILE authorization is dead must show the
+            # auth error, not a benign "Waiting for appliance…" that sends the
+            # user hunting a discovery problem.
+            bridge.mark_auth_required()
         else:
             bridge.mark_waiting()
         self.logger.info("Home Connect device '%s' started (haId=%s)", dev.name, redact(haid))
@@ -677,6 +694,10 @@ def _control_error_hint(exc):
                 "and Remote Start are still enabled on the appliance, and that no one is operating "
                 "it directly")
     if exc.status == 429:
+        if exc.retry_after:
+            minutes = int(exc.retry_after // 60) + 1
+            return (f"Home Connect is rate-limiting ({exc}). Try again in about "
+                    f"{minutes} minute(s)")
         return f"Home Connect is rate-limiting ({exc}). Wait a minute, then try again"
     if exc.status == 403:
         return (f"not authorized for this action ({exc}). Re-authorize the plugin so it has the "

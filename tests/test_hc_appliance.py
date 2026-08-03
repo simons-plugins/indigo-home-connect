@@ -249,3 +249,38 @@ def test_paired_forces_reread_despite_fresh_window():
     appliance.on_paired()                        # PAIRED may mean a NEW appliance
     sched.run_all()
     assert len(reader.calls) == 10
+
+
+def test_abandoned_read_pass_does_not_arm_fresh_window():
+    # A pass abandoned by a disconnect must NOT count as a completed read: the
+    # next reconnect needs the full pass or the device serves incomplete state
+    # for five silent minutes.
+    clock = Clock()
+    reader = FakeReader()
+    sched = RecordingScheduler()
+    appliance = HomeConnectAppliance("H", {"connected": True}, reader, sched.post,
+                                     logger=Mock(), monotonic=clock.monotonic)
+    appliance.on_paired()
+    appliance.on_disconnected()                  # abandons the queued pass
+    sched.run_all()
+    assert reader.calls == []                    # pass was abandoned, nothing read
+
+    appliance.on_connected()                     # moments later: must NOT be suppressed
+    sched.run_all()
+    assert len(reader.calls) == 5
+
+
+def test_aborted_read_error_drops_quietly_without_retry():
+    # An abort() raise (shutdown / superseded client) is a teardown, not a
+    # failure: no retry may be scheduled and no scary warning logged.
+    clock = Clock()
+    reader = FakeReader()
+    reader.queue("appliance", HomeConnectError("request abandoned", aborted=True))
+    sched = RecordingScheduler()
+    logger = Mock()
+    appliance = HomeConnectAppliance("H", {"connected": True}, reader, sched.post,
+                                     logger=logger, monotonic=clock.monotonic)
+    appliance.on_paired()
+    sched.run_all()
+    assert len(sched.jobs) == 0                  # no retry scheduled
+    assert not logger.warning.called             # debug only, no false "retrying"

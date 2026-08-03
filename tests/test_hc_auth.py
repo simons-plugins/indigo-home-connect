@@ -440,3 +440,18 @@ def test_matches_compares_full_client_config(tmp_path):
     assert not auth.matches(CLIENT_B, "s1", False)
     assert not auth.matches(CLIENT_A, "s2", False)
     assert not auth.matches(CLIENT_A, "s1", True)
+
+
+def test_refresh_deferred_while_request_gate_closed(tmp_path):
+    # A token POST behind a closed gate would block the caller — the plugin's
+    # supervisor thread — for the whole Retry-After. Defer instead; the 60s
+    # tick retries once the gate opens.
+    api = FakeAPI()
+    auth = make_auth(api, tmp_path)
+    auth._store_token(token_response())
+    api.gate_wait = 600.0
+    assert auth.refresh_if_needed(force=True) is False
+    assert api.post_calls == []                  # no HTTP even attempted
+    api.gate_wait = 0.0
+    api.queue_post(token_response(access="ACCESS-2", refresh="REFRESH-2"))
+    assert auth.refresh_if_needed(force=True) is True

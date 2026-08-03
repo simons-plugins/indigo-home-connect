@@ -36,7 +36,32 @@ Red-team hardening, wave 1 — fixes for the highest-severity findings of the
 - **Reconnect re-reads are suppressed within a 5-minute freshness window (#12).**
   A stream blip or a CONNECTED flap just after a completed full read no longer
   costs another 3–5 GET pass (self-powering-off dishwashers flap by design);
-  PAIRED and first discovery still force a read.
+  PAIRED and first discovery still force a read. Abandoned passes never arm the
+  window.
+
+Review round (CodeRabbit + 4-lens agent review) — further fixes on the same
+findings:
+- A 429 **received mid-request** with a long Retry-After now raises to the
+  caller instead of re-entering the gate wait — the pre-flight check passes
+  moments before the 429 lands, and retrying would block the calling (possibly
+  Indigo UI/action) thread for the whole block. Short blocks (≤5 s) are still
+  waited out and retried.
+- Auth-required device marking is now **level-triggered as well as
+  edge-triggered**: a device created or restarted while authorization is dead
+  shows "Authorization required" (not "Waiting for appliance…"), and a device
+  flow that ends denied/expired/failed marks devices from the worker (the
+  coordinator-stop edge never fires in that path).
+- Pressing **Authorize** now stops a coordinator wired to the superseded
+  client, instead of leaving its reconnect loop error-spinning against the
+  aborted api (false "failing repeatedly" warnings) until the next tick.
+- Token refresh **defers while the request gate is closed** — a token POST
+  would otherwise block the supervisor thread (stalling reconcile) for the
+  whole Retry-After.
+- Requests abandoned by shutdown/supersession are tagged and logged as
+  teardown (debug), never as "read failed … retrying in Ns" warnings that
+  would be false twice over.
+- Gate-wait log lines humanize long delays ("24.0h", not "86400.0s"); the 429
+  action hint uses the server's actual Retry-After when present.
 
 ## [2026.1.2] — 2026-08-03
 
