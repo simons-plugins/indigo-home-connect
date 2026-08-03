@@ -1,3 +1,5 @@
+<img src="docs/assets/home-connect-logo.svg" alt="Home Connect" width="340">
+
 # Home Connect for Indigo
 
 An [Indigo](https://www.indigodomo.com) plugin for **Bosch / Siemens / Neff / Gaggenau**
@@ -15,6 +17,7 @@ Domio like any other device.
 ## Contents
 
 - [Requirements](#requirements)
+- [Installation](#installation)
 - [Supported appliances](#supported-appliances)
 - [Setup](#setup)
   - [1. Register a Home Connect application](#1-register-a-home-connect-application)
@@ -37,6 +40,17 @@ Domio like any other device.
 - A free [Home Connect developer](https://developer.home-connect.com) account with a
   registered application set to **OAuth Device Flow** (walkthrough below).
 - No bundled dependencies — Python **standard library only**.
+
+## Installation
+
+1. Download `Home.Connect.indigoPlugin.zip` from the
+   [latest release](https://github.com/simons-plugins/indigo-home-connect/releases/latest)
+   and unzip it.
+2. **Double-click `Home Connect.indigoPlugin`** on the Mac running Indigo Server.
+   Indigo offers to install and enable the plugin.
+3. **Updating:** download the new release and double-click it the same way — Indigo
+   replaces the installed version and restarts the plugin. Your settings, authorization,
+   and devices are preserved.
 
 ## Supported appliances
 
@@ -121,8 +135,6 @@ Secret, copy that too (most Device Flow applications do not need one).
 3. Choose the **Treat "disconnected" as Off** policy (see
    [offline vs off](#offline-vs-off)) and save.
 
-For a first-time install, double-click the `.indigoPlugin` bundle; see
-[`docs/JARVIS-INSTALL.md`](docs/JARVIS-INSTALL.md) for install/update details.
 
 ## Device states
 
@@ -333,5 +345,10 @@ The author of homebridge-homeconnect also runs an unofficial
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+*Home Connect and the Home Connect logo are trademarks of BSH Hausgeräte GmbH. This
+plugin is an independent open-source project, not affiliated with or endorsed by BSH.
+The logo (in `docs/assets/`) is used solely to identify the service the plugin connects
+to and is not covered by this repository's MIT license.*
 </content>
 </invoke>

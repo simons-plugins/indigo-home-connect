@@ -63,8 +63,8 @@ def test_run_device_flow_reuses_code_started_by_caller(tmp_path):
     """The Authorize button calls start_device_flow (to display the user code)
     then hands off to run_device_flow on a worker thread. run_device_flow must
     poll THAT code, not start a second flow — otherwise the user approves the
-    displayed code while the plugin polls an orphaned one (jarvis 2026-08-02:
-    two user codes logged ~200ms apart, auth never completed)."""
+    displayed code while the plugin polls an orphaned one (seen in the field
+    2026-08-02: two user codes logged ~200ms apart, auth never completed)."""
     api = FakeAPI()
     api.queue_post(DEVICE_AUTH).queue_post(token_response())
     auth = make_auth(api, tmp_path)
