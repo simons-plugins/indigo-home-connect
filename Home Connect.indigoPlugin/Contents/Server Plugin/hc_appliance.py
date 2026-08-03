@@ -263,9 +263,10 @@ class HomeConnectAppliance:
                 self._read_actions = None     # abandon any pending reads
             elif changed:
                 # A fresh CONNECTED is a real signal from the appliance: a
-                # parked read queue gets another chance.
+                # parked read queue gets another chance, from a clean backoff.
                 self._read_parked = False
                 self._read_failures = 0
+                self._read_delay = 0.0
         if value:
             self._schedule_read()
         if changed:
@@ -279,6 +280,7 @@ class HomeConnectAppliance:
                     return
                 self._read_parked = False
                 self._read_failures = 0
+                self._read_delay = 0.0
             if not force and self._last_read_complete is not None:
                 age = self._monotonic() - self._last_read_complete
                 if age < READ_FRESH_WINDOW:

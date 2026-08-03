@@ -620,11 +620,13 @@ def test_event_stream_stable_stream_resets_escalation():
 
 def test_parse_bare_field_name_is_valid_not_garbage():
     # SSE allows "data" with no colon (empty value) — it must not restart the
-    # stream. Pure digits stay garbage (the injected-hex-chunk-length bug).
+    # stream. All-hex tokens stay garbage (the injected-chunk-length bug), and
+    # hex lengths often start with a LETTER, not a digit.
     events = list(parse_sse_lines(lines("event:STATUS\ndata\n\n")))
     assert events == [{"event": "STATUS", "data": ""}]
-    with pytest.raises(SseParseError):
-        list(parse_sse_lines(lines("event:STATUS\n1a2f\n\n")))
+    for garbage in ("1a2f", "cafe", "DEAD", "a2f1"):
+        with pytest.raises(SseParseError):
+            list(parse_sse_lines(lines(f"event:STATUS\n{garbage}\n\n")))
 
 
 def test_depaired_removes_appliance_and_notifies():

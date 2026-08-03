@@ -155,10 +155,12 @@ def parse_sse_lines(lines):
             continue
         match = _FIELD_RE.match(line)
         if not match:
-            if line.isalnum() and line.isascii() and not line[0].isdigit():
+            if (line.isalnum() and line.isascii()
+                    and not all(c in "0123456789abcdefABCDEF" for c in line)):
                 # A bare field name with no colon is VALID SSE (empty value) —
-                # it must not restart the stream. Pure digits stay garbage:
-                # that's the API's historic injected-hex-chunk-length bug.
+                # it must not restart the stream. All-hex tokens stay garbage:
+                # that's the API's historic injected-chunk-length bug, and hex
+                # lengths often start with a letter ("cafe", "a2f1").
                 fields.setdefault(line, "")
                 continue
             raise SseParseError(f"unparseable SSE line: {line[:80]!r}")

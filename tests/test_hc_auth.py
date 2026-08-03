@@ -457,14 +457,18 @@ def test_refresh_deferred_while_request_gate_closed(tmp_path):
     assert auth.refresh_if_needed(force=True) is True
 
 
-def test_corrupt_entry_without_expires_at_refreshes_not_crashes(tmp_path):
-    # A hand-edited/truncated token file entry missing expires_at was a
-    # KeyError-per-tick loop in the supervisor; it must instead be treated as
-    # due immediately and rewritten whole by the refresh.
+@pytest.mark.parametrize("entry", [
+    {"access_token": "A", "refresh_token": "R"},                          # missing
+    {"access_token": "A", "refresh_token": "R", "expires_at": "soon"},    # non-numeric
+])
+def test_corrupt_expires_at_refreshes_not_crashes(tmp_path, entry):
+    # A hand-edited/truncated token file entry with a missing or non-numeric
+    # expires_at was a KeyError/TypeError-per-tick loop in the supervisor; it
+    # must instead be due immediately and rewritten whole by the refresh.
     api = FakeAPI()
     auth = make_auth(api, tmp_path)
-    auth._store._entries[CLIENT_A] = {"access_token": "A", "refresh_token": "R"}
+    auth._store._entries[CLIENT_A] = dict(entry)
     assert auth.next_refresh_due() is not None
     api.queue_post(token_response(access="ACCESS-2", refresh="REFRESH-2"))
     assert auth.refresh_if_needed() is True
-    assert auth.access_expires_at() is not None      # entry rewritten whole
+    assert isinstance(auth.access_expires_at(), float)   # entry rewritten whole

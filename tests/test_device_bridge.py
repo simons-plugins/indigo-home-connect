@@ -409,8 +409,8 @@ def test_new_dynamic_value_pushed_in_separate_batch():
     assert len(dev.batches) == 2
     first, second = dev.batches
     assert any(u["key"] == "operationState" for u in first)
-    assert all("Vendor_Weird_NewKey" not in u["key"] for u in first)
-    assert any("NewKey" in u["key"] for u in second)
+    assert all(u["key"] != "vendorWeirdNewKey" for u in first)     # sanitized ID
+    assert {"key": "vendorWeirdNewKey", "value": "x", "uiValue": "x"} in second
 
 
 def test_failed_dynamic_registration_still_pushes_known_states():
@@ -427,4 +427,4 @@ def test_failed_dynamic_registration_still_pushes_known_states():
     # Exactly one batch (known states); the unregistered key's value withheld.
     pushed_keys = [u["key"] for batch in dev.batches for u in batch]
     assert "operationState" in pushed_keys
-    assert not any("NewKey" in k for k in pushed_keys)
+    assert "vendorWeirdNewKey" not in pushed_keys                  # sanitized ID

@@ -217,7 +217,10 @@ class Plugin(indigo.PluginBase):
             state = self._auth.state() if self._auth else STATE_UNAUTHORIZED
             values["authStatus"] = _STATE_TEXT.get(state, "")
         except Exception as exc:  # pylint: disable=broad-except
-            self.logger.debug("Home Connect: auth status unavailable for config dialog: %s", exc)
+            # Type only — an auth-layer exception string could embed sensitive
+            # material and this is just dialog cosmetics.
+            self.logger.debug("Home Connect: auth status unavailable for config dialog (%s)",
+                              type(exc).__name__)
         return values
 
     def authorizeButtonPressed(self, valuesDict, typeId="", devId=0):  # noqa: N803
