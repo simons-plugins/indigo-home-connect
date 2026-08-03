@@ -1,0 +1,80 @@
+# Changelog
+
+All notable changes to the Home Connect plugin. Format loosely follows
+[Keep a Changelog](https://keepachangelog.com); versions are `YYYY.R.P` (Indigo
+convention). Versions `2026.0.x` were the phased internal build-up; **`2026.1.0`** is the
+first release of the complete, user-visible feature set.
+
+## [2026.1.0] — 2026-08-03
+
+Phase 5 — final polish and full user documentation. First minor release: the plugin is now
+feature-complete and field-validated on real hardware (Bosch dryer, Siemens dishwasher).
+
+### Added
+- **Full user documentation.** Rewritten `README.md`: supported appliances, per-type state
+  tables, actions, and step-by-step sections for developer-portal registration, the
+  authorize flow, remote start, rate limits, and troubleshooting.
+- **`docs/APPLIANCES.md`** — per-appliance-type capability notes and known quirks, with
+  field-validated vs simulator-validated status per type.
+- Startup now logs a one-line **version + configured-device-count** summary at info.
+
+### Changed
+- Control-action API failures are logged with an **actionable next step** — a `409` names
+  the door/remote-control/local-use checks to make, `429` says to wait and retry, `403`
+  says to re-authorize; authorization errors point at the Client ID and Device Flow setting.
+- A deliberate shutdown of the SSE stream now logs at **debug**, not warning (closing the
+  socket under the blocked reader is expected, not a fault); genuine drops still warn and
+  note that reconnect is automatic.
+
+## [2026.0.5] — Phase 4: control actions
+
+- `Actions.xml` + `hc_control.py`: Start / Select / Stop / Pause / Resume Program, Send
+  Command (Open Door / Partly Open Door), Set Power State, Set Setting (advanced).
+- **"Refuse locally before any HTTP"** guard rails: every call is pre-flight-checked against
+  the cached appliance state, so a request Home Connect would reject never leaves the plugin
+  (dodging the 10-consecutive-errors block).
+- Local rate limiters (5 starts + 5 stops per rolling 60 s); program-start PUT marked
+  `no_retry` so a lost response can never double-start; post-start operation-state watch that
+  warns if a start never leaves `Ready` (door/water/tank).
+- Dynamic program/command/power menus served from the 24 h capability cache; localized
+  program names; full-`/programs` menu source (works around appliances that report only the
+  dial's program as "available").
+
+## [2026.0.4] — Phase 3: Indigo device layer
+
+- Seven device types — Dishwasher, Dryer, Washer, Oven, Coffee Maker, Fridge Freezer, and a
+  generic Home Connect Appliance fallback — with a shared 15-state common block plus
+  type-specific states.
+- `device_bridge.py`: batched `updateStatesOnServer`, a computed `status` summary
+  (`Run · Eco 50 · 1:24 remaining`), dynamic string states for undocumented keys, last-event
+  tracking, and the per-device off-vs-disconnected policy.
+- Discovery-driven appliance picker (type-filtered, "(in use)" marked), late-attach on
+  PAIRED, and a **Log Discovered Appliances** menu item.
+
+## [2026.0.3] — Phase 2: SSE event stream + state engine
+
+- One global Server-Sent-Events stream (`hc_events.py`): tolerant parser, infinite reconnect
+  with a 120 s dead-stream timeout, keep-alive filtering, and synthetic START/STOP.
+- Per-appliance state engine (`hc_appliance.py`): flat key→value cache, observer API, EVENT
+  de-duplication, and a sequential reconnect re-read queue that is abandoned the moment an
+  appliance disconnects (never burns budget on offline appliances).
+- Settings-only appliances (fridge/freezer) skip program reads; a 401 on the stream forces
+  one token refresh + single retry (no reconnect storm on a dead token).
+
+## [2026.0.2] — Phase 1: OAuth + rate-limit-aware client
+
+- `hc_api.py`: stdlib `http.client` transport with a plugin-wide request gate, idempotent-only
+  retries (never 400/403/404/405/406/409/415), `Retry-After` handling, a daily 1000-request
+  budget counter (warning at 800), and token/haId redaction.
+- `hc_auth.py`: OAuth **Device Flow** (production) and Authorization Code Grant (simulator);
+  per-client token store (JSON, `0600`, atomic merge-on-write); proactive refresh with
+  `invalid_grant` → authorization-required detection.
+- `hc_cache.py`: 24 h TTL disk cache with stale-value fallback, invalidated on version change.
+- `PluginConfig.xml` authorize flow: Client ID / secret / simulator toggle, verification URL
+  and user code shown in the dialog and Event Log.
+
+## [2026.0.1] — Phase 0: scaffold
+
+- Plugin bundle layout, `Info.plist`, CI (version-check, pytest, release), `pyproject.toml`
+  lint config (netro pattern), `CLAUDE.md`, and the README skeleton.
+</content>
