@@ -47,6 +47,13 @@ READ_MIN_DELAY = 5.0
 READ_MAX_DELAY = 10 * 60.0
 READ_FACTOR = 2.0
 
+# A completed full re-read this recent is fresh enough: stream reconnects and
+# CONNECTED flaps within the window skip the whole 3-5 GET pass. Appliances
+# that self-power-off (dishwashers) flap DISCONNECTED/CONNECTED by design, and
+# an unsuppressed re-read per flap can exhaust the daily budget with zero user
+# activity. PAIRED / first discovery force a read regardless.
+READ_FRESH_WINDOW = 5 * 60.0
+
 # Bound on remembered EVENT dedupe keys (guards unbounded growth).
 MAX_SEEN_EVENTS = 512
 
@@ -80,6 +87,7 @@ class HomeConnectAppliance:
         self._read_actions = None             # list of pending actions, or None
         self._read_delay = 0.0
         self._read_scheduled = False
+        self._last_read_complete = None       # monotonic time of last full pass
 
         # Generation counter cancels a superseded pending-disconnect job.
         self._disconnect_gen = 0
@@ -222,7 +230,7 @@ class HomeConnectAppliance:
 
     def on_paired(self):
         """PAIRED (or first discovery): re-read state — may be a new appliance."""
-        self._schedule_read()
+        self._schedule_read(force=True)
 
     def _set_connected(self, value):
         changed = False
@@ -238,8 +246,14 @@ class HomeConnectAppliance:
             self._notify(CONNECTED, value)
 
     # -- Re-read queue (runs on the worker thread) --------------------------
-    def _schedule_read(self):
+    def _schedule_read(self, force=False):
         with self._lock:
+            if not force and self._last_read_complete is not None:
+                age = self._monotonic() - self._last_read_complete
+                if age < READ_FRESH_WINDOW:
+                    self._logger.debug("Home Connect %s: skipping re-read (last full read "
+                                       "%.0fs ago)", self.name, age)
+                    return
             if self._read_actions is not None:
                 return                        # a read is already pending/running
             actions = list(_READ_BASE)
@@ -256,6 +270,8 @@ class HomeConnectAppliance:
             with self._lock:
                 if not self._read_actions:    # finished ([]) or abandoned (None)
                     finished = self._read_actions is not None
+                    if finished:
+                        self._last_read_complete = self._monotonic()
                     self._read_actions = None
                     self._read_scheduled = False
                     connected = self._state.get(CONNECTED)

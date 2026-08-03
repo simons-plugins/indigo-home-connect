@@ -5,7 +5,7 @@ from unittest.mock import Mock
 from hc_api import HomeConnectError
 from hc_appliance import (HomeConnectAppliance, CONNECTED, DISCONNECT_DELAY,
                           READ_MIN_DELAY, SELECTED_PROGRAM)
-from support import FakeReader, RecordingScheduler
+from support import Clock, FakeReader, RecordingScheduler
 
 
 def make_appliance(reader=None, scheduler=None, info=None, supports_programs=True):
@@ -209,3 +209,43 @@ def test_guard_require_connected():
         assert False, "expected HomeConnectError"
     except HomeConnectError:
         pass
+
+
+# -- Red-team wave 1: re-read freshness suppression (#12) ---------------------
+
+def test_reconnect_within_fresh_window_skips_reread():
+    # Stream reconnects and CONNECTED flaps just after a full read must NOT
+    # cost another 5-GET pass; a flapping appliance can otherwise exhaust the
+    # daily budget with zero user activity.
+    clock = Clock()
+    reader = FakeReader()
+    sched = RecordingScheduler()
+    appliance = HomeConnectAppliance("H", {"connected": True}, reader, sched.post,
+                                     logger=Mock(), monotonic=clock.monotonic)
+    appliance.on_paired()
+    sched.run_all()
+    assert len(reader.calls) == 5                # appliance/status/settings/sel/act
+
+    appliance.on_stream_start()                  # reconnect moments later
+    sched.run_all()
+    appliance.on_connected()                     # CONNECTED flap
+    sched.run_all()
+    assert len(reader.calls) == 5                # both suppressed
+
+    clock.t += 400                               # past the 5-minute window
+    appliance.on_stream_start()
+    sched.run_all()
+    assert len(reader.calls) == 10               # re-read runs again
+
+
+def test_paired_forces_reread_despite_fresh_window():
+    clock = Clock()
+    reader = FakeReader()
+    sched = RecordingScheduler()
+    appliance = HomeConnectAppliance("H", {"connected": True}, reader, sched.post,
+                                     logger=Mock(), monotonic=clock.monotonic)
+    appliance.on_paired()
+    sched.run_all()
+    appliance.on_paired()                        # PAIRED may mean a NEW appliance
+    sched.run_all()
+    assert len(reader.calls) == 10
