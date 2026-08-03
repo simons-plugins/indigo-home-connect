@@ -54,6 +54,12 @@ READ_FACTOR = 2.0
 # activity. PAIRED / first discovery force a read regardless.
 READ_FRESH_WINDOW = 5 * 60.0
 
+# After this many consecutive failed passes the queue parks (~20 min of
+# backed-off attempts): an appliance the cloud lists as connected but whose
+# endpoints persistently error would otherwise grind ~144 requests/day forever.
+# A CONNECTED/PAIRED signal (or a forced read) unparks it.
+READ_GIVE_UP_AFTER = 8
+
 # Bound on remembered EVENT dedupe keys (guards unbounded growth).
 MAX_SEEN_EVENTS = 512
 
@@ -88,6 +94,8 @@ class HomeConnectAppliance:
         self._read_delay = 0.0
         self._read_scheduled = False
         self._last_read_complete = None       # monotonic time of last full pass
+        self._read_failures = 0               # consecutive failed passes
+        self._read_parked = False             # gave up until a fresh signal
 
         # Generation counter cancels a superseded pending-disconnect job.
         self._disconnect_gen = 0
@@ -184,7 +192,16 @@ class HomeConnectAppliance:
                 key = item.get("key")
                 if key is None:
                     continue
-                dedupe_key = (key, item.get("timestamp"))
+                timestamp = item.get("timestamp")
+                if timestamp is None:
+                    # No timestamp -> nothing to dedupe on. Treat as fresh:
+                    # colliding every occurrence at (key, None) silently
+                    # swallowed real repeats for weeks on quiet appliances.
+                    value = item.get("value")
+                    self._state[key] = value
+                    fresh.append((key, value))
+                    continue
+                dedupe_key = (key, timestamp)
                 if dedupe_key in self._seen_events:
                     continue
                 self._seen_events.add(dedupe_key)
@@ -244,6 +261,11 @@ class HomeConnectAppliance:
             changed = previous != value
             if not value:
                 self._read_actions = None     # abandon any pending reads
+            elif changed:
+                # A fresh CONNECTED is a real signal from the appliance: a
+                # parked read queue gets another chance.
+                self._read_parked = False
+                self._read_failures = 0
         if value:
             self._schedule_read()
         if changed:
@@ -252,6 +274,11 @@ class HomeConnectAppliance:
     # -- Re-read queue (runs on the worker thread) --------------------------
     def _schedule_read(self, force=False):
         with self._lock:
+            if self._read_parked:
+                if not force:
+                    return
+                self._read_parked = False
+                self._read_failures = 0
             if not force and self._last_read_complete is not None:
                 age = self._monotonic() - self._last_read_complete
                 if age < READ_FRESH_WINDOW:
@@ -276,6 +303,7 @@ class HomeConnectAppliance:
                     finished = self._read_actions is not None
                     if finished:
                         self._last_read_complete = self._monotonic()
+                        self._read_failures = 0
                     self._read_actions = None
                     self._read_scheduled = False
                     connected = self._state.get(CONNECTED)
@@ -311,6 +339,16 @@ class HomeConnectAppliance:
                 self._read_scheduled = False
                 self._logger.debug("Home Connect %s: dropping '%s' read (disconnected)",
                                    self.name, action)
+                return
+            self._read_failures += 1
+            if self._read_failures >= READ_GIVE_UP_AFTER:
+                self._read_parked = True
+                self._read_actions = None
+                self._read_scheduled = False
+                self._logger.warning(
+                    "Home Connect %s: state reads keep failing (%d attempts, last: %s) — "
+                    "pausing until the appliance reports again", self.name,
+                    self._read_failures, exc)
                 return
             self._read_delay = min(self._read_delay * READ_FACTOR or READ_MIN_DELAY, READ_MAX_DELAY)
             delay = self._read_delay

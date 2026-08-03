@@ -284,3 +284,62 @@ def test_aborted_read_error_drops_quietly_without_retry():
     sched.run_all()
     assert len(sched.jobs) == 0                  # no retry scheduled
     assert not logger.warning.called             # debug only, no false "retrying"
+
+
+# -- Red-team wave 2 (#16 parking, L4 dedupe) ---------------------------------
+
+def test_persistent_read_failures_park_until_fresh_signal(monkeypatch):
+    import hc_appliance as mod
+    monkeypatch.setattr(mod, "READ_GIVE_UP_AFTER", 2)
+    clock = Clock()
+    reader = FakeReader()
+    reader.queue("appliance", HomeConnectError("init failed", status=409),
+                 HomeConnectError("init failed", status=409))
+    sched = RecordingScheduler()
+    logger = Mock()
+    appliance = HomeConnectAppliance("H", {"connected": True}, reader, sched.post,
+                                     logger=logger, monotonic=clock.monotonic)
+    appliance.on_paired()
+    sched.run_all()                              # fail, retry, fail -> parked
+    assert any("pausing until the appliance reports again" in str(c)
+               for c in logger.warning.call_args_list)
+    calls_when_parked = len(reader.calls)
+
+    appliance.on_stream_start()                  # routine reconnect: stays parked
+    sched.run_all()
+    assert len(reader.calls) == calls_when_parked
+
+    appliance.on_paired()                        # PAIRED (forced): unparks
+    sched.run_all()
+    assert len(reader.calls) > calls_when_parked
+
+
+def test_connected_transition_unparks_reads(monkeypatch):
+    import hc_appliance as mod
+    monkeypatch.setattr(mod, "READ_GIVE_UP_AFTER", 1)
+    clock = Clock()
+    reader = FakeReader()
+    reader.queue("appliance", HomeConnectError("boom", status=500))
+    sched = RecordingScheduler()
+    appliance = HomeConnectAppliance("H", {"connected": True}, reader, sched.post,
+                                     logger=Mock(), monotonic=clock.monotonic)
+    appliance.on_paired()
+    sched.run_all()                              # one failure -> parked
+    parked_calls = len(reader.calls)
+
+    appliance.on_disconnected()
+    appliance.on_connected()                     # a real signal from the appliance
+    sched.run_all()
+    assert len(reader.calls) > parked_calls
+
+
+def test_event_without_timestamp_always_fires():
+    # (key, None) collided in the dedupe set: the second real occurrence was
+    # silently swallowed until 512 other events evicted it.
+    appliance, _, _ = make_appliance()
+    fired = []
+    appliance.subscribe("BSH.Common.Event.ProgramFinished", lambda k, v: fired.append(v))
+    item = {"key": "BSH.Common.Event.ProgramFinished", "value": "Present"}   # no timestamp
+    appliance.handle_event_items([item])
+    appliance.handle_event_items([dict(item)])
+    assert fired == ["Present", "Present"]
