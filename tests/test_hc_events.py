@@ -290,7 +290,7 @@ class _StubApi:
         self._items = deque(items)
         self.open_calls = 0
 
-    def open_stream(self, path, read_timeout=None):  # noqa: ARG002
+    def open_stream(self, path, read_timeout=None, abort_check=None):  # noqa: ARG002
         self.open_calls += 1
         item = self._items.popleft()
         if isinstance(item, Exception):
@@ -491,3 +491,44 @@ def test_dishwasher_reads_programs_end_to_end():
         {"haId": "HA-DW", "name": "Dish", "type": "Dishwasher", "connected": True})
     assert any(p.endswith("/programs/selected") for p in paths), paths
     assert any(p.endswith("/programs/active") for p in paths), paths
+
+
+# -- Red-team wave 1: reconnect escalation (#11) -------------------------------
+
+def test_event_stream_escalates_backoff_after_repeated_failed_opens():
+    # A sustained outage at the 60s cap would burn ~1440 stream opens/day; after
+    # escalate_after consecutive failures the delay must jump to the extended cap.
+    api = _StubApi([HomeConnectError("boom")] * 6)
+    sleeps = []
+    stop = threading.Event()
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 5:
+            stop.set()
+
+    logger = Mock()
+    EventStream(api, dispatch=lambda e: None, logger=logger, sleep=fake_sleep,
+                escalate_after=3, reconnect_extended=900.0).run(stop)
+    assert sleeps[:2] == [1.0, 2.0]           # normal doubling below the threshold
+    assert sleeps[2:] == [900.0, 900.0, 900.0]  # escalated and stays escalated
+    slow_warnings = [c for c in logger.warning.call_args_list if "slowing reconnects" in str(c)]
+    assert len(slow_warnings) == 1            # logged once at the transition, not per cycle
+
+
+def test_event_stream_short_lived_connects_count_toward_escalation():
+    # Connect-then-immediate-drop flapping burns opens just like refused opens:
+    # streams that die before proving stable must escalate too.
+    api = _StubApi([_StubStreamResp([])] * 6)   # opens fine, ends instantly
+    sleeps = []
+    stop = threading.Event()
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 4:
+            stop.set()
+
+    EventStream(api, dispatch=lambda e: None, logger=Mock(), sleep=fake_sleep,
+                escalate_after=3, reconnect_extended=900.0,
+                monotonic=lambda: 0.0).run(stop)   # frozen clock: lived == 0 < stable
+    assert sleeps[-1] == 900.0
