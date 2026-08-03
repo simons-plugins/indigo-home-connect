@@ -562,3 +562,42 @@ def test_event_stream_closes_stream_when_shutdown_wins_open_race():
                 logger=Mock(), sleep=lambda s: None).run(stop)
     assert race_stream.closed
     assert START not in dispatched         # never claimed to be connected
+
+
+def test_event_stream_stable_stream_resets_escalation():
+    # After escalation, one stream that survives past stable_seconds must reset
+    # the failure count: the next drop reconnects fast again (60s cap), not 15min.
+    clock = Clock()
+
+    class _LongLivedStream:
+        def lines(self):
+            clock.t += 500                           # stream "lives" 500s > 120s stable
+            return iter([])
+
+        def close(self):
+            pass
+
+    streams = deque([HomeConnectError("down")] * 3
+                    + [_LongLivedStream()]           # connects, lives past stable
+                    + [HomeConnectError("down")] * 2)
+
+    class _Api:
+        def open_stream(self, path, read_timeout=None, abort_check=None):  # noqa: ARG002
+            item = streams.popleft()
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    sleeps = []
+    stop = threading.Event()
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if not streams:
+            stop.set()
+
+    EventStream(_Api(), dispatch=lambda e: None, logger=Mock(), sleep=fake_sleep,
+                escalate_after=3, reconnect_extended=900.0,
+                monotonic=clock.monotonic).run(stop)
+    assert sleeps[2] == 900.0                        # escalated after 3 failures
+    assert sleeps[3] == 1.0                          # stable stream reset the count
