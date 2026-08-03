@@ -57,22 +57,30 @@ class DiskCache:
 
     def get(self, key, loader):
         """Return a cached fresh value, else ``loader()``; on loader failure,
-        fall back to the stale cached value if one exists."""
+        fall back to the stale cached value if one exists.
+
+        The loader runs OUTSIDE the lock: it may perform a slow HTTP request
+        (or wait out the shared rate-limit gate), and holding the lock across
+        that would queue every other cache reader — including Indigo UI menu
+        builds — behind one stalled load. Two concurrent misses on the same key
+        may both invoke the loader; the later result wins, an accepted rare
+        cost of one extra request."""
         with self._lock:
             entry = self._entries.get(key)
             if entry is not None and (self._now() - entry.get("ts", 0)) < self._ttl:
                 return entry.get("value")
-            try:
-                value = loader()
-            except Exception as exc:  # pylint: disable=broad-except
-                if entry is not None:
-                    self._logger.warning("Home Connect cache: loader for '%s' failed (%s); "
-                                         "using stale value", key, exc)
-                    return entry.get("value")
-                raise
+        try:
+            value = loader()
+        except Exception as exc:  # pylint: disable=broad-except
+            if entry is not None:
+                self._logger.warning("Home Connect cache: loader for '%s' failed (%s); "
+                                     "using stale value", key, exc)
+                return entry.get("value")
+            raise
+        with self._lock:
             self._entries[key] = {"ts": self._now(), "value": value}
             self._save()
-            return value
+        return value
 
     def set(self, key, value):
         with self._lock:

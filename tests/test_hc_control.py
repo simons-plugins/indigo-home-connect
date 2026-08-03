@@ -602,3 +602,31 @@ def test_start_watch_timeout_exception_safe_and_unsubscribes():
     scheduler.run_all()                                # timer fires -> must not raise
     assert logger.exception.called                     # logged cleanly
     assert appliance._observers.get(OPERATION_STATE) in (None, [])   # still unsubscribed
+
+
+# -- Red-team wave 1: fail-fast when the gate is closed (#8) ------------------
+
+def test_control_refused_locally_when_gate_closed(tmp_path):
+    # A Retry-After can run to hours; an Indigo action thread must be refused
+    # with a time, never blocked on the gate.
+    transport = ScriptedTransport()
+    controller = make_controller(transport, tmp_path)
+    controller._api._earliest_retry = 600.0        # gate closed for 10 minutes
+    with pytest.raises(ControlRefused) as exc:
+        controller.start_program(make_appliance(), "BSH.Common.Program.Auto")
+    assert "rate-limited" in str(exc.value)
+    assert transport.requests == []                # nothing left the plugin
+
+
+def test_capability_load_serves_stale_cache_when_gated(tmp_path):
+    transport = ScriptedTransport()
+    body = json.dumps({"data": {"programs": [{"key": "P1"}]}})
+    transport.queue(200, HC_JSON, body)
+    controller = make_controller(transport, tmp_path)
+    appliance = make_appliance()
+    assert controller.all_programs(appliance) == [{"key": "P1"}]   # first load cached
+    # Entry expired AND the gate closed: the stale value must serve, no HTTP.
+    controller._cache._entries[f"all-programs:{HAID}"]["ts"] = -999_999
+    controller._api._earliest_retry = 600.0
+    assert controller.all_programs(appliance) == [{"key": "P1"}]
+    assert len(transport.requests) == 1            # no second request attempted
