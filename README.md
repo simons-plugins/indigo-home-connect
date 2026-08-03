@@ -1,3 +1,5 @@
+<img src="docs/assets/home-connect-logo.svg" alt="Home Connect" width="340">
+
 # Home Connect for Indigo
 
 An [Indigo](https://www.indigodomo.com) plugin for **Bosch / Siemens / Neff / Gaggenau**
@@ -333,5 +335,10 @@ The author of homebridge-homeconnect also runs an unofficial
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+*Home Connect and the Home Connect logo are trademarks of BSH Hausgeräte GmbH. This
+plugin is an independent open-source project, not affiliated with or endorsed by BSH.
+The logo (in `docs/assets/`) is used solely to identify the service the plugin connects
+to and is not covered by this repository's MIT license.*
 </content>
 </invoke>
