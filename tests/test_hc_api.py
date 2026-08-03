@@ -110,21 +110,39 @@ def test_non_idempotent_post_not_retried_on_5xx():
 
 # -- Rate-limit gate ----------------------------------------------------------
 
-def test_request_gate_blocks_during_retry_after_window():
+def test_short_429_retry_after_waited_out_and_retried():
+    # A brief block (<= MAX_429_RETRY_WAIT) is waited out at the gate and the
+    # request retried — with NO additional backoff sleep (429 is gate-managed).
     transport = ScriptedTransport()
-    transport.queue(429, {"content-type": "application/json", "retry-after": "30"}, "{}")
+    transport.queue(429, {"content-type": "application/json", "retry-after": "3"}, "{}")
     transport.queue(200, HC_JSON, json.dumps({"data": {}}))
     clock = Clock()
     api = make_api(transport, clock=clock)
     result = api.get_json("/api/homeappliances")
     assert result == {"data": {}}
-    # The 429 pushed the gate forward 30s; the retry waited exactly that long.
-    assert clock.slept == [30]
+    assert clock.slept == [3]              # exactly the gate wait, nothing else
+
+
+def test_long_429_retry_after_raises_instead_of_blocking():
+    # A long block must NOT be retried in-request: the pre-flight gate check
+    # passed moments earlier, and waiting here would hang the calling (possibly
+    # Indigo UI/action) thread for the whole Retry-After.
+    transport = ScriptedTransport()
+    transport.queue(429, {"content-type": "application/json", "retry-after": "1800"}, "{}")
+    clock = Clock()
+    api = make_api(transport, clock=clock)
+    with pytest.raises(HomeConnectError) as exc:
+        api.get_json("/api/homeappliances")
+    assert exc.value.status == 429
+    assert exc.value.retry_after == 1800
+    assert clock.slept == []               # never slept the block out
+    assert len(transport.requests) == 1
+    assert api.gate_wait_remaining() == 1800.0   # future requests still gated
 
 
 def test_gate_countdown_logged_once():
     transport = ScriptedTransport()
-    transport.queue(429, {"content-type": "application/json", "retry-after": "10"}, "{}")
+    transport.queue(429, {"content-type": "application/json", "retry-after": "3"}, "{}")
     transport.queue(200, HC_JSON, "{}")
     logger = Mock()
     api = make_api(transport, logger=logger)
@@ -258,14 +276,17 @@ def test_no_retry_start_401_without_handler_raises_once():
 
 def test_headerless_429_applies_default_gate():
     # BSH's non-time-based limits return 429 with NO Retry-After; a synthetic
-    # gate delay must still apply or an error loop hammers the API.
+    # gate delay must still apply or an error loop hammers the API. The 60s
+    # default exceeds the in-request retry threshold, so the request raises and
+    # the gate holds for everything that follows.
     transport = ScriptedTransport()
     transport.queue(429, {"content-type": "application/json"}, "{}")
-    transport.queue(200, HC_JSON, json.dumps({"data": {}}))
     clock = Clock()
     api = make_api(transport, clock=clock)
-    api.get_json("/api/homeappliances")
-    assert hc_api.DEFAULT_RETRY_AFTER in clock.slept
+    with pytest.raises(HomeConnectError):
+        api.get_json("/api/homeappliances")
+    assert clock.slept == []
+    assert api.gate_wait_remaining() == float(hc_api.DEFAULT_RETRY_AFTER)
 
 
 def test_abort_raises_instead_of_waiting_out_gate():
@@ -305,3 +326,36 @@ def test_retry_backoff_between_5xx_attempts():
     api.get_json("/api/homeappliances")
     assert clock.slept == [2.0, 4.0]
     assert len(transport.requests) == 3
+
+
+def test_open_stream_abort_check_interrupts_gate_wait():
+    # The reader passes its stop event as abort_check: a coordinator stop must
+    # unblock a reconnect parked at a closed gate, promptly and with no HTTP.
+    transport = ScriptedTransport()
+    clock = Clock()
+    api = make_api(transport, clock=clock)
+    api._earliest_retry = 500.0
+    with pytest.raises(HomeConnectError) as exc:
+        api.open_stream("/api/homeappliances/events", abort_check=lambda: True)
+    assert exc.value.aborted
+    assert transport.requests == []
+
+
+def test_abort_during_retry_backoff_raises():
+    # Shutdown landing mid-backoff must raise, not fire another attempt at a
+    # dead client.
+    transport = ScriptedTransport()
+    transport.queue_exception(OSError("connection reset"))
+    transport.queue(200, HC_JSON, json.dumps({"data": {}}))
+    clock = Clock()
+    api = make_api(transport, clock=clock)
+
+    def sleep_then_abort(seconds):
+        clock.sleep(seconds)
+        api.abort()
+
+    api._sleep = sleep_then_abort
+    with pytest.raises(HomeConnectError) as exc:
+        api.get_json("/api/homeappliances")
+    assert exc.value.aborted
+    assert len(transport.requests) == 1    # the retry never fired

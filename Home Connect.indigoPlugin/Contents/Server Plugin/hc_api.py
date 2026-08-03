@@ -3,7 +3,7 @@
 Implements the plugin-wide request gate, retry policy, ``Retry-After`` handling,
 a daily request-budget counter and the error-envelope parsing described in the
 PRD (``docs/plans/PRD-indigo-home-connect.md`` §2-3). No third-party deps — the
-transport is ``http.client`` so it can be extended with SSE streaming in Phase 2.
+transport is ``http.client``, which also serves the SSE stream (:meth:`open_stream`).
 
 The transport is injectable (``connection_factory``) so tests can drive it with a
 fake connection without touching the network. This module never imports
@@ -55,6 +55,13 @@ RETRY_BACKOFF_BASE = 2.0
 # While waiting out the gate, wake this often to notice abort()/shutdown.
 _GATE_WAIT_SLICE = 1.0
 
+# A 429 received mid-request is only retried when the advertised wait is this
+# short; anything longer raises so the CALLER decides (menus degrade to stale
+# cache, actions log the actionable hint) instead of the calling thread —
+# possibly an Indigo UI/action thread that passed its pre-flight gate check
+# moments earlier — silently blocking out a Retry-After that can run to hours.
+MAX_429_RETRY_WAIT = 5.0
+
 # BSH returns localized program/option/setting display ``name``s keyed off the
 # request's Accept-Language. No config UI for it (PRD keeps auth-only prefs); a
 # module constant is enough to get the app's names ("Kurz 60" etc.) instead of
@@ -89,12 +96,17 @@ class HomeConnectError(Exception):
     (seconds) advertised by the server.
     """
 
-    def __init__(self, message, status=None, key=None, description=None, retry_after=None):
+    def __init__(self, message, status=None, key=None, description=None, retry_after=None,
+                 aborted=False):
         super().__init__(message)
         self.status = status
         self.key = key
         self.description = description
         self.retry_after = retry_after
+        # True when the request was abandoned by abort()/shutdown rather than
+        # failing — callers use it to skip "will retry" logging that would be
+        # false during a teardown.
+        self.aborted = aborted
 
 
 class RawResponse:
@@ -167,6 +179,15 @@ class StreamResponse:
             self._conn.close()
         except Exception:  # pylint: disable=broad-except
             pass
+
+
+def _human_delay(seconds):
+    """Render a gate delay readably — '86400.0s' hides that it means a day."""
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f}h"
+    if seconds >= 60:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds:.1f}s"
 
 
 def _default_connection_factory(host, timeout):
@@ -303,7 +324,14 @@ class HomeConnectAPI:
                     continue
 
             if self._can_retry(raw.status, retryable, attempt):
-                if raw.status != 429:         # a 429 retry waits at the gate instead
+                if raw.status == 429:
+                    # A short block is waited out at the gate; a long one is the
+                    # caller's problem — retrying would block this thread for
+                    # the whole Retry-After even though the pre-flight gate
+                    # check passed moments before the 429 landed.
+                    if self.gate_wait_remaining() > MAX_429_RETRY_WAIT:
+                        raise err
+                else:
                     self._backoff_before_retry(attempt)
                 attempt += 1
                 continue
@@ -321,7 +349,9 @@ class HomeConnectAPI:
         retry — so a reconnect loop never re-opens forever with a dead token.
         Non-2xx responses (after that single retry) raise a
         :class:`HomeConnectError`; the caller (``hc_events``) runs the reconnect
-        loop.
+        loop. ``abort_check()`` is polled once per 1 s slice of any gate wait
+        and aborts it by raising (``aborted=True``) — the reader passes its stop
+        event so a coordinator stop unblocks a gated reconnect promptly.
         """
         unauthorized_retried = False
         while True:
@@ -413,10 +443,11 @@ class HomeConnectAPI:
                     break
                 if self._abort.is_set() or (abort_check is not None and abort_check()):
                     raise HomeConnectError(
-                        f"request abandoned while rate-limited ({delay:.0f}s of Retry-After remaining)")
+                        f"request abandoned while rate-limited ({delay:.0f}s of Retry-After "
+                        "remaining)", aborted=True)
                 if not self._gate_logged:
-                    self._logger.warning("Home Connect rate limit: waiting %.1fs before next request",
-                                         delay)
+                    self._logger.warning("Home Connect rate limit: waiting %s before next request",
+                                         _human_delay(delay))
                     self._gate_logged = True
                 if self._sleep is not None:
                     self._sleep(delay)        # injected test clock jumps the whole delay
@@ -436,7 +467,7 @@ class HomeConnectAPI:
         else:
             self._abort.wait(delay)
         if self._abort.is_set():
-            raise HomeConnectError("request abandoned during retry backoff")
+            raise HomeConnectError("request abandoned during retry backoff", aborted=True)
 
     def _apply_retry_after(self, raw):
         seconds = self._parse_retry_after(raw)

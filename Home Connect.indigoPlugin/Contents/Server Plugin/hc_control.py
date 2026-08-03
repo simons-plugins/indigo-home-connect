@@ -11,7 +11,11 @@ act on ("Remote Start not allowed — enable it on the appliance").
 
 On top of the state pre-flight there are two local sliding-window limiters — five
 program starts and five stops per rolling 60 s — that refuse the sixth attempt
-*before* any HTTP, matching BSH's hard 5-per-minute limits.
+*before* any HTTP, matching BSH's hard 5-per-minute limits. A third refusal
+family guards the shared request gate: while a 429 ``Retry-After`` block is in
+force (>5 s remaining), control calls refuse locally with a wait time and
+capability loads fall back to the stale cache, so no Indigo thread ever blocks
+out a rate-limit window.
 
 Capability lookups (available programs, available commands, PowerState allowed
 values) go through the 24 h :class:`~hc_cache.DiskCache`, so building an action
@@ -240,7 +244,9 @@ class Controller:
         self._stop_limiter = RateLimiter(STOP_LIMIT, "Program stop", now=now)
         self._ready_timeout = ready_timeout
 
-    # -- Guard rails (raise ControlRefused; read only the local state cache) --
+    # -- Guard rails (refuse locally, before any HTTP: state-cache checks raise
+    # ControlRefused; the capability-gate check raises HomeConnectError so the
+    # stale-cache fallback still works) -------------------------------------
     def _require_gate_open(self):
         """Refuse before any HTTP while the client is rate-limited."""
         wait = self._api.gate_wait_remaining()
