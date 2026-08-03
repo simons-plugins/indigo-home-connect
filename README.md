@@ -17,6 +17,7 @@ Domio like any other device.
 ## Contents
 
 - [Requirements](#requirements)
+- [Installation](#installation)
 - [Supported appliances](#supported-appliances)
 - [Setup](#setup)
   - [1. Register a Home Connect application](#1-register-a-home-connect-application)
@@ -39,6 +40,17 @@ Domio like any other device.
 - A free [Home Connect developer](https://developer.home-connect.com) account with a
   registered application set to **OAuth Device Flow** (walkthrough below).
 - No bundled dependencies — Python **standard library only**.
+
+## Installation
+
+1. Download `Home.Connect.indigoPlugin.zip` from the
+   [latest release](https://github.com/simons-plugins/indigo-home-connect/releases/latest)
+   and unzip it.
+2. **Double-click `Home Connect.indigoPlugin`** on the Mac running Indigo Server.
+   Indigo offers to install and enable the plugin.
+3. **Updating:** download the new release and double-click it the same way — Indigo
+   replaces the installed version and restarts the plugin. Your settings, authorization,
+   and devices are preserved.
 
 ## Supported appliances
 
@@ -123,8 +135,6 @@ Secret, copy that too (most Device Flow applications do not need one).
 3. Choose the **Treat "disconnected" as Off** policy (see
    [offline vs off](#offline-vs-off)) and save.
 
-For a first-time install, double-click the `.indigoPlugin` bundle; see
-[`docs/JARVIS-INSTALL.md`](docs/JARVIS-INSTALL.md) for install/update details.
 
 ## Device states
 
