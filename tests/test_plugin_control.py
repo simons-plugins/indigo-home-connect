@@ -162,6 +162,27 @@ def test_remote_409_logs_once_no_watch_limiter_consumed(tmp_path):
     assert [r["method"] for r in transport.requests] == ["PUT"]     # one attempt, not retried
 
 
+def test_409_error_message_is_actionable(tmp_path):
+    # A 409 from BSH must be logged with a concrete next step, not just "HTTP 409".
+    transport = ScriptedTransport()
+    transport.queue(409, HC_JSON, json.dumps({"error": {"key": "BSH.Common.Error.Conflict"}}))
+    p = _plugin(transport, tmp_path)
+    p._coordinator = _FakeCoord([_appliance()])
+    p.startProgram(_Action({"program": "X.Program"}), _device())
+    assert p.logger.error.called
+    message = " ".join(str(a) for a in p.logger.error.call_args[0])
+    assert "door is shut" in message and "Remote Control" in message
+
+
+def test_control_error_hint_maps_statuses():
+    from hc_api import HomeConnectError
+    assert "rate-limiting" in plugin._control_error_hint(HomeConnectError("x", status=429))
+    assert "Control scope" in plugin._control_error_hint(HomeConnectError("x", status=403))
+    assert "door is shut" in plugin._control_error_hint(HomeConnectError("x", status=409))
+    # An unmapped status falls back to the raw error string.
+    assert plugin._control_error_hint(HomeConnectError("boom", status=500)) == "boom"
+
+
 def test_429_retry_after_surfaces_once_second_start_waits_on_gate(tmp_path):
     transport = ScriptedTransport()
     transport.queue(429, {"content-type": "application/json", "retry-after": "30"}, "{}")

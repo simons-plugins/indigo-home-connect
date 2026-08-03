@@ -63,6 +63,9 @@ class Plugin(indigo.PluginBase):
         self.logger.info("Home Connect plugin starting")
         self._rebuild_client()
         self._reconcile_coordinator()
+        device_count = len(list(indigo.devices.iter("self")))
+        self.logger.info("Home Connect %s started with %d device(s) configured",
+                         self.pluginVersion, device_count)
 
     def shutdown(self):
         self._stop_auth.set()
@@ -223,8 +226,10 @@ class Plugin(indigo.PluginBase):
             valuesDict["authStatus"] = "Waiting for you to authorize in the browser…"
             self._start_device_flow_worker(auth, client_id, self._stop_auth)
         except HomeConnectError as exc:
-            valuesDict["authStatus"] = f"Authorization error: {exc}"
-            self.logger.error("Home Connect authorization error: %s", exc)
+            valuesDict["authStatus"] = (f"Authorization error: {exc}. Check the Client ID is "
+                                        "correct and set to Device Flow, then press Authorize again.")
+            self.logger.error("Home Connect authorization error: %s — check the Client ID and that "
+                              "the application uses OAuth Device Flow", exc)
         return valuesDict
 
     def _start_device_flow_worker(self, auth, client_id, stop_event):
@@ -480,7 +485,8 @@ class Plugin(indigo.PluginBase):
         except hc_control.ControlRefused as exc:
             self.logger.error("Home Connect '%s': %s", dev.name, exc.reason)
         except HomeConnectError as exc:
-            self.logger.error("Home Connect '%s': %s failed: %s", dev.name, describe, exc)
+            self.logger.error("Home Connect '%s': could not %s — %s",
+                              dev.name, describe, _control_error_hint(exc))
 
     def _schedule_later(self, fn, delay):
         """Run ``fn`` after ``delay`` seconds on a daemon timer (start-watch)."""
@@ -623,6 +629,24 @@ class Plugin(indigo.PluginBase):
         if len(errors) > 0:
             return (False, valuesDict, errors)
         return (True, valuesDict)
+
+
+def _control_error_hint(exc):
+    """Turn a control-call API failure into a message that says what to DO.
+
+    The BSH error text on its own ("HTTP 409 …") tells the user nothing
+    actionable, so the documented control statuses (PRD §6) map to a concrete
+    next step. Anything else falls back to the raw error string."""
+    if exc.status == 409:
+        return (f"the appliance refused it ({exc}). Check its door is shut, that Remote Control "
+                "and Remote Start are still enabled on the appliance, and that no one is operating "
+                "it directly")
+    if exc.status == 429:
+        return f"Home Connect is rate-limiting ({exc}). Wait a minute, then try again"
+    if exc.status == 403:
+        return (f"not authorized for this action ({exc}). Re-authorize the plugin so it has the "
+                "Control scope")
+    return str(exc)
 
 
 def _int_or_zero(value):
