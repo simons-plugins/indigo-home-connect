@@ -730,3 +730,86 @@ def test_zombie_stream_left_alone_when_idle():
                          monotonic=ticking_monotonic,
                          activity_check=lambda: False, zombie_after=1500.0)
     assert list(stream._read_events(_KeepAliveStream(5))) == []  # pylint: disable=protected-access
+
+
+def test_real_events_reset_zombie_clock():
+    # A stream interleaving real events with keep-alives must never renew —
+    # otherwise every mid-program stream churns each zombie_after window.
+    clock = Clock()
+
+    def ticking_monotonic():
+        clock.t += 1000.0
+        return clock.t
+
+    class _MixedStream:
+        def lines(self):
+            for _ in range(6):
+                yield "event:KEEP-ALIVE"
+                yield ""
+                yield "event:STATUS"
+                yield "id:H"
+                yield "data:{}"
+                yield ""
+
+        def close(self):
+            pass
+
+    stream = EventStream(None, dispatch=lambda e: None, logger=Mock(),
+                         monotonic=ticking_monotonic,
+                         activity_check=lambda: True, zombie_after=1500.0)
+    events = list(stream._read_events(_MixedStream()))   # pylint: disable=protected-access
+    assert len(events) == 6                              # completed without renewal
+
+
+def test_zombie_renewal_stop_carries_no_error():
+    # The renewal STOP must take the grace-delay path: with an error, every
+    # bridge would flap Off and fire triggers mid-program on every renewal.
+    clock = Clock()
+
+    def ticking_monotonic():
+        clock.t += 1000.0
+        return clock.t
+
+    class _RenewApi:
+        def open_stream(self, path, read_timeout=None, abort_check=None):  # noqa: ARG002
+            return _KeepAliveStream(5)
+
+    stops = []
+    stop = threading.Event()
+
+    def dispatch(event):
+        if event.event == STOP:
+            stops.append(event)
+
+    def fake_sleep(seconds):  # noqa: ARG001
+        stop.set()
+
+    EventStream(_RenewApi(), dispatch=dispatch, logger=Mock(), sleep=fake_sleep,
+                monotonic=ticking_monotonic,
+                activity_check=lambda: True, zombie_after=1500.0).run(stop)
+    assert len(stops) == 1
+    assert stops[0].error is None                        # grace path, no flap
+
+
+def test_discovery_deferred_while_gate_closed():
+    # Discovery runs on the worker that also routes events: it must reschedule,
+    # never block, when the rate-limit gate is closed.
+    api = FakeAPI()
+    api.get_json = Mock()
+    api.gate_wait = 300.0
+    coord = HomeConnectCoordinator(api, logger=Mock(), stream=StubStream())
+    posted = []
+    coord._scheduler.post = lambda fn, delay=0: posted.append(delay)  # pylint: disable=protected-access
+    coord._discover()                        # pylint: disable=protected-access
+    assert not api.get_json.called           # no HTTP attempted
+    assert posted == [301.0]                 # rescheduled past the gate
+
+
+def test_reader_program_swallows_connection_init_failed():
+    # The cloud's "still (re)establishing its own link" 409: treating it as a
+    # failure ground a listed-as-connected appliance through 144 req/day (#16).
+    reader, api = make_reader()
+    api.get_json = Mock(side_effect=HomeConnectError(
+        "x", status=409, key="SDK.Error.HomeAppliance.Connection.Initialization.Failed"))
+    assert reader.get_selected_program("H") is None
+    assert reader.get_active_program("H") is None

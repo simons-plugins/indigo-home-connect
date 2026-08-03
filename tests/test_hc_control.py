@@ -704,7 +704,8 @@ def test_value_watch_warns_when_value_never_lands():
                           describe="power state")
     scheduled[0]()                               # nothing arrived over SSE
     message = " ".join(str(c) for c in logger.warning.call_args_list)
-    assert "accepted but has not taken effect" in message
+    assert "accepted but has not been reflected" in message
+    assert "may still apply" in message          # uncertainty, not failure (cloud lag)
     assert "power state" in message
 
 
@@ -717,3 +718,16 @@ def test_value_watch_unsubscribes_after_timeout():
     # A later change must not resurrect the watch (observer removed).
     appliance.merge_items([{"key": "SomeKey", "value": "v"}])
     assert watch._done
+
+
+@pytest.mark.parametrize("current,expected,should_match", [
+    ("BSH.Common.EnumType.PowerState.Off", "BSH.Common.EnumType.PowerState.Off", True),
+    (True, True, True),
+    (1, True, True),                    # Python equality: SSE 1 vs coerced True
+    (45, 45.0, True),                   # float echo of an int setting
+    ("5.5", 5.5, True),                 # str fallback catches numeric echo
+    ("BSH.Common.EnumType.PowerState.On", "BSH.Common.EnumType.PowerState.Off", False),
+    (None, "x", False),
+])
+def test_value_watch_matches_representations(current, expected, should_match):
+    assert hc_control.ValueWatch._matches(current, expected) is should_match
