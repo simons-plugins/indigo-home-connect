@@ -609,10 +609,12 @@ class HomeConnectCoordinator:
     def _discover(self):
         # Never block the worker at the rate-limit gate: this thread routes
         # every live SSE event, so a gate-blocked HTTP call here would freeze
-        # device updates for the whole Retry-After. Defer instead.
+        # device updates for the whole Retry-After. A closed gate ALWAYS skips
+        # the HTTP call; the reschedule is what shutdown skips.
         wait = self._reader.gate_wait_remaining()
-        if wait > 0 and not self._stop.is_set():
-            self._scheduler.post(self._discover, min(wait + 1.0, self._discovery_interval))
+        if wait > 0:
+            if not self._stop.is_set():
+                self._scheduler.post(self._discover, min(wait + 1.0, self._discovery_interval))
             return
         try:
             found = self._reader.list_appliances()

@@ -212,7 +212,8 @@ class Plugin(indigo.PluginBase):
             # Credentials changed while devices were live: the new client is
             # unauthorized, so nothing streams until the user authorizes —
             # surface that instead of freezing devices at healthy-looking state.
-            if had_coordinator and not self._auth.is_authorized():
+            # State check (not token presence): same contract as reconcile.
+            if had_coordinator and self._auth.state() != STATE_AUTHORIZED:
                 self._mark_devices_auth_required()
 
     # -- Config UI -----------------------------------------------------------

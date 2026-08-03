@@ -813,3 +813,19 @@ def test_reader_program_swallows_connection_init_failed():
         "x", status=409, key="SDK.Error.HomeAppliance.Connection.Initialization.Failed"))
     assert reader.get_selected_program("H") is None
     assert reader.get_active_program("H") is None
+
+
+def test_discovery_with_closed_gate_never_blocks_even_during_shutdown():
+    # A stop() racing an in-flight _discover must not fall through to the
+    # blocking HTTP call: closed gate always skips it, shutdown just skips the
+    # reschedule too.
+    api = FakeAPI()
+    api.get_json = Mock()
+    api.gate_wait = 300.0
+    coord = HomeConnectCoordinator(api, logger=Mock(), stream=StubStream())
+    coord._stop.set()                        # pylint: disable=protected-access
+    posted = []
+    coord._scheduler.post = lambda fn, delay=0: posted.append(delay)  # pylint: disable=protected-access
+    coord._discover()                        # pylint: disable=protected-access
+    assert not api.get_json.called           # no HTTP, no block
+    assert posted == []                      # and no reschedule while stopping
