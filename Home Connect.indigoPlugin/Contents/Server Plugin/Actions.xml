@@ -23,6 +23,12 @@
 			<Field id="optionsHelp" type="label" fontSize="small" alignWithControl="true">
 				<Label>Optional. One key=value per line, e.g. BSH.Common.Option.StartInRelative=3600. Values coerce to true/false (bool), whole numbers (int), otherwise text. Leave blank to start with the program's defaults. Requires Remote Start enabled on the appliance and OperationState = Ready.</Label>
 			</Field>
+			<Field id="powerOnFirst" type="checkbox" defaultValue="true">
+				<Label>Power on first if needed:</Label>
+			</Field>
+			<Field id="powerOnFirstHelp" type="label" fontSize="small" alignWithControl="true">
+				<Label>Many dishwashers power themselves off after a cycle and on door events, which would otherwise leave a scheduled start refused as "not ready". With this ticked, the plugin powers the appliance on and waits for it to become Ready before starting. Power-on cannot grant Remote Start — you must still enable that on the appliance (it auto-expires ~24h). Appliances whose power is read-only cannot be powered on remotely.</Label>
+			</Field>
 		</ConfigUI>
 	</Action>
 
@@ -39,6 +45,12 @@
 			</Field>
 			<Field id="optionsHelp" type="label" fontSize="small" alignWithControl="true">
 				<Label>Optional. One key=value per line (see Start Program). Select only stages the program; it does not need Remote Start, but the appliance must be on.</Label>
+			</Field>
+			<Field id="powerOnFirst" type="checkbox" defaultValue="true">
+				<Label>Power on first if needed:</Label>
+			</Field>
+			<Field id="powerOnFirstHelp" type="label" fontSize="small" alignWithControl="true">
+				<Label>If the appliance is off (dishwashers self-off after a cycle), power it on and wait for Ready before selecting. Appliances whose power is read-only cannot be powered on remotely.</Label>
 			</Field>
 		</ConfigUI>
 	</Action>

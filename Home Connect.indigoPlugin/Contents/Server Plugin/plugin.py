@@ -407,10 +407,13 @@ class Plugin(indigo.PluginBase):
         dev, dev_id = self._resolve_action_device(action, dev)
         program = action.props.get("program", "")
         overrides = action.props.get("optionOverrides", "")
+        # Default True: existing actions created before this feature have no prop
+        # and get the new default (matches the checkbox's defaultValue).
+        power_on_first = hc.to_bool(action.props.get("powerOnFirst", True))
 
         def operation(controller, appliance):
             options = hc_control.parse_options(overrides)   # may raise ControlRefused
-            controller.start_program(appliance, program, options)
+            controller.start_program(appliance, program, options, power_on_first=power_on_first)
             # Only after a successful start: watch that OperationState actually
             # leaves Ready — a start can fail appliance-side (door/water) with no
             # error. Reached only if start_program did not raise.
@@ -422,10 +425,11 @@ class Plugin(indigo.PluginBase):
         dev, dev_id = self._resolve_action_device(action, dev)
         program = action.props.get("program", "")
         overrides = action.props.get("optionOverrides", "")
+        power_on_first = hc.to_bool(action.props.get("powerOnFirst", True))
 
         def operation(controller, appliance):
             options = hc_control.parse_options(overrides)
-            controller.select_program(appliance, program, options)
+            controller.select_program(appliance, program, options, power_on_first=power_on_first)
 
         self._run_control(dev, dev_id, "select program", operation)
 

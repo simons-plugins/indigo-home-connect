@@ -35,7 +35,7 @@ class _FakeCoord:
         return list(self._appliances)
 
 
-def _plugin(transport, tmp_path):
+def _plugin(transport, tmp_path, ready_timeout=25.0):
     p = plugin.Plugin("com.simons-plugins.homeconnect", "Home Connect", "2026.0.5", {})
     clock = Clock()
     api_logger = Mock()
@@ -44,7 +44,8 @@ def _plugin(transport, tmp_path):
                          monotonic=clock.monotonic, sleep=clock.sleep,
                          wall_now=lambda: datetime(2026, 8, 2, tzinfo=timezone.utc))
     cache = DiskCache(str(tmp_path / "cache.json"), "test", logger=Mock())
-    p._controller = Controller(api, cache, logger=Mock(), now=clock.monotonic)
+    p._controller = Controller(api, cache, logger=Mock(), now=clock.monotonic,
+                               ready_timeout=ready_timeout)
     p.logger = Mock()
     # Record StartWatch scheduling instead of firing a real 15s timer, so tests
     # can assert whether a watch was armed.
@@ -142,6 +143,46 @@ def test_action_when_appliance_absent_logs_error(tmp_path):
     p.pauseProgram(_Action(), _device(haid="HA-MISSING"))
     assert p.logger.error.called
     assert transport.requests == []
+
+
+def _off_appliance():
+    appliance = HomeConnectAppliance(
+        HAID, {"name": "Dishwasher", "type": "Dishwasher", "connected": True},
+        Mock(), Mock(), logger=Mock())
+    appliance.merge_items([
+        {"key": OPERATION_STATE, "value": "BSH.Common.EnumType.OperationState.Inactive"},
+        {"key": POWER_STATE_KEY, "value": "BSH.Common.EnumType.PowerState.Off"},
+    ])
+    return appliance
+
+
+# ---------------------------------------------------------------------------
+# Auto power-on checkbox plumbing (powerOnFirst)
+# ---------------------------------------------------------------------------
+def test_power_on_first_default_true_attempts_power_on(tmp_path):
+    # No powerOnFirst prop -> defaults True -> off appliance triggers the power-on
+    # path (constraints GET + PowerState PUT); Ready never arrives -> refusal.
+    transport = ScriptedTransport()
+    body = json.dumps({"data": {"constraints": {
+        "allowedvalues": ["BSH.Common.EnumType.PowerState.Off", "BSH.Common.EnumType.PowerState.On"],
+        "access": "readWrite"}}})
+    transport.queue(200, HC_JSON, body)              # GET power constraints
+    transport.queue(204, HC_JSON, b"")               # PUT PowerState=On
+    p = _plugin(transport, tmp_path, ready_timeout=0.1)
+    p._coordinator = _FakeCoord([_off_appliance()])
+    p.startProgram(_Action({"program": "P"}), _device())    # no powerOnFirst key
+    assert [(r["method"], r["url"].split("/")[-1]) for r in transport.requests] == [
+        ("GET", POWER_STATE_KEY), ("PUT", POWER_STATE_KEY)]     # power-on attempted
+    assert p.logger.error.called                     # timed out -> actionable error, no start
+
+
+def test_power_on_first_false_skips_power(tmp_path):
+    transport = ScriptedTransport()
+    p = _plugin(transport, tmp_path)
+    p._coordinator = _FakeCoord([_off_appliance()])
+    p.startProgram(_Action({"program": "P", "powerOnFirst": False}), _device())
+    assert transport.requests == []                  # off + no power-on -> straight refusal
+    assert p.logger.error.called
 
 
 # ---------------------------------------------------------------------------

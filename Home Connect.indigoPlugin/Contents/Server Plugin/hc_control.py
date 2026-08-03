@@ -39,12 +39,18 @@ PAUSE_COMMAND = "BSH.Common.Command.PauseProgram"
 RESUME_COMMAND = "BSH.Common.Command.ResumeProgram"
 OPEN_DOOR_COMMAND = "BSH.Common.Command.OpenDoor"
 PARTLY_OPEN_DOOR_COMMAND = "BSH.Common.Command.PartlyOpenDoor"
+POWER_ON_VALUE = "BSH.Common.EnumType.PowerState.On"
 
 # Operation-state tails (enum-tail form) that gate stop and start-confirmation.
 _STOPPABLE_STATES = frozenset({"DelayedStart", "Run", "Pause", "ActionRequired"})
 _STARTED_STATES = frozenset({"DelayedStart", "Run"})
 _READY_STATE = "Ready"
+_INACTIVE_STATE = "Inactive"
+_OFF_STATE = "Off"
+_ON_STATE = "On"
 _POWERED_OFF_STATES = frozenset({"Off", "Standby"})
+# PowerState constraint access values that permit writing On (None = unreported).
+_WRITABLE_ACCESS = frozenset({"readWrite", "writeOnly"})
 
 # Local rate limits (PRD §2): five program starts AND five stops per minute.
 START_LIMIT = 5
@@ -53,6 +59,10 @@ RATE_WINDOW = 60.0
 
 # How long after a start we allow the appliance to leave Ready before warning.
 START_WATCH_DELAY = 15.0
+
+# How long auto-power-on waits (event-driven) for OperationState to reach Ready
+# after powering an appliance on, before giving up. Injectable for tests.
+READY_TIMEOUT = 25.0
 
 
 class ControlRefused(Exception):
@@ -211,12 +221,13 @@ def parse_options(text):
 class Controller:
     """Executes control actions behind local guard rails and rate limiters."""
 
-    def __init__(self, api, cache, logger=None, now=time.monotonic):
+    def __init__(self, api, cache, logger=None, now=time.monotonic, ready_timeout=READY_TIMEOUT):
         self._api = api
         self._cache = cache
         self._logger = logger or logging.getLogger("hc_control")
         self._start_limiter = RateLimiter(START_LIMIT, "Program start", now=now)
         self._stop_limiter = RateLimiter(STOP_LIMIT, "Program stop", now=now)
+        self._ready_timeout = ready_timeout
 
     # -- Guard rails (raise ControlRefused; read only the local state cache) --
     @staticmethod
@@ -251,6 +262,78 @@ class Controller:
         if power in _POWERED_OFF_STATES:
             raise ControlRefused(f"{appliance.name} is powered off")
 
+    # -- Auto power-on (dishwashers self-off after a cycle / on door events) --
+    @staticmethod
+    def _is_powered_off(appliance):
+        """True if the appliance looks powered off. ``PowerState=Off`` or
+        ``OperationState=Inactive`` are definitive; an off appliance often reports
+        neither field, so connected-but-both-absent is also treated as off (the
+        On PUT is idempotent and Ready is verified before starting). An explicit
+        ``PowerState=On`` is never treated as off."""
+        power = hc.enum_tail(appliance.get(POWER_STATE_KEY))
+        if power == _OFF_STATE:
+            return True
+        if power == _ON_STATE:
+            return False
+        op = hc.enum_tail(appliance.get(OPERATION_STATE))
+        if op == _INACTIVE_STATE:
+            return True
+        return power is None and op is None
+
+    def _ensure_powered_on(self, appliance):
+        """If the appliance is off, power it on and wait (event-driven) for Ready.
+
+        Raises :class:`ControlRefused` when power is not remotely writable or the
+        appliance never reaches Ready — in both cases the caller must NOT start.
+        A no-op (no request) when the appliance is already on."""
+        self._require_connected(appliance)
+        if not self._is_powered_off(appliance):
+            return
+        constraints = self.power_constraints(appliance)
+        on_value = next((v for v in (constraints.get("allowedvalues") or [])
+                         if hc.enum_tail(v) == _ON_STATE), None)
+        access = constraints.get("access")
+        if on_value is None or (access is not None and access not in _WRITABLE_ACCESS):
+            raise ControlRefused(
+                f"{appliance.name} is off and cannot be powered on remotely — "
+                "press its power button")
+        self._logger.info("Home Connect %s: powering on before program (haId=%s)",
+                          appliance.name, redact(appliance.haid))
+        # Normal retryable PUT — setting PowerState=On is idempotent, so a retry
+        # after a lost response is safe (unlike a program start).
+        self._api.put_json(f"/api/homeappliances/{appliance.haid}/settings/{POWER_STATE_KEY}",
+                           {"data": {"key": POWER_STATE_KEY, "value": on_value}})
+        if not self._wait_ready(appliance):
+            raise ControlRefused(
+                f"{appliance.name} was powered on but did not become Ready within "
+                f"{int(self._ready_timeout)}s — check the appliance display")
+
+    def _wait_ready(self, appliance):
+        """Block (on the calling thread) until OperationState reaches Ready or the
+        timeout elapses. Event-driven via the appliance observer API — no polling.
+
+        Safe from an Indigo action thread: the ``Event`` is set by the SSE
+        dispatch thread's ``merge_items`` -> observer callback, which runs without
+        holding the appliance lock, so the action thread waiting here cannot
+        deadlock the reader (mirrors StartWatch's subscribe pattern in reverse)."""
+        if hc.enum_tail(appliance.get(OPERATION_STATE)) == _READY_STATE:
+            return True
+        ready = threading.Event()
+
+        def on_change(_key, value):
+            if hc.enum_tail(value) == _READY_STATE:
+                ready.set()
+
+        appliance.subscribe(OPERATION_STATE, on_change)
+        try:
+            # Re-check after subscribing: Ready may have arrived in the race
+            # between the first check and the subscribe.
+            if hc.enum_tail(appliance.get(OPERATION_STATE)) == _READY_STATE:
+                return True
+            return ready.wait(self._ready_timeout)
+        finally:
+            appliance.unsubscribe(OPERATION_STATE, on_change)
+
     # -- Capability lookups (24 h cache; one live fetch on a miss) ------------
     def all_programs(self, appliance):
         """Cached list of ALL program dicts (``key`` + localized ``name`` +
@@ -271,10 +354,14 @@ class Controller:
         haid = appliance.haid
         return self._cache.get(f"commands:{haid}", lambda: self._load_commands(haid))
 
+    def power_constraints(self, appliance):
+        """Cached PowerState ``constraints`` dict (``allowedvalues`` + ``access``)."""
+        haid = appliance.haid
+        return self._cache.get(f"power:{haid}", lambda: self._load_power_constraints(haid))
+
     def power_allowed_values(self, appliance):
         """Cached PowerState ``constraints.allowedvalues`` (``[]`` if unknown)."""
-        haid = appliance.haid
-        return self._cache.get(f"power:{haid}", lambda: self._load_power_values(haid))
+        return self.power_constraints(appliance).get("allowedvalues", []) or []
 
     def _load_all_programs(self, haid):
         data = self._api.get_json(f"/api/homeappliances/{haid}/programs")
@@ -289,19 +376,23 @@ class Controller:
             raise
         return (data or {}).get("data", {}).get("commands", []) or []
 
-    def _load_power_values(self, haid):
+    def _load_power_constraints(self, haid):
         data = self._api.get_json(f"/api/homeappliances/{haid}/settings/{POWER_STATE_KEY}")
-        constraints = (data or {}).get("data", {}).get("constraints", {}) or {}
-        return constraints.get("allowedvalues", []) or []
+        return (data or {}).get("data", {}).get("constraints", {}) or {}
 
     # -- Control operations --------------------------------------------------
-    def start_program(self, appliance, program_key, options=None):
+    def start_program(self, appliance, program_key, options=None, power_on_first=False):
         """PUT /programs/active behind the full remote-start pre-flight + limiter.
 
         The PUT is issued with ``no_retry`` so a lost response can never
-        double-start the appliance (PRD §3.3)."""
+        double-start the appliance (PRD §3.3). When ``power_on_first`` and the
+        appliance is off, it is powered on (waiting for Ready) BEFORE the guard
+        rails run — remote-start flags only mean anything once the appliance is
+        on. The power-on PUT is not a program start; the limiter counts once."""
         if not program_key:
             raise ControlRefused("no program selected to start")
+        if power_on_first:
+            self._ensure_powered_on(appliance)
         self._require_remote_start(appliance)
         self._start_limiter.acquire()
         payload = {"data": {"key": program_key, "options": list(options or [])}}
@@ -310,10 +401,15 @@ class Controller:
         self._api.put_json(f"/api/homeappliances/{appliance.haid}/programs/active",
                            payload, no_retry=True)
 
-    def select_program(self, appliance, program_key, options=None):
-        """PUT /programs/selected — connected + powered, no remote-start needed."""
+    def select_program(self, appliance, program_key, options=None, power_on_first=False):
+        """PUT /programs/selected — connected + powered, no remote-start needed.
+
+        When ``power_on_first`` and the appliance is off, it is powered on (waiting
+        for Ready) before the powered check."""
         if not program_key:
             raise ControlRefused("no program chosen to select")
+        if power_on_first:
+            self._ensure_powered_on(appliance)
         self._require_powered(appliance)
         payload = {"data": {"key": program_key, "options": list(options or [])}}
         self._logger.info("Home Connect %s: selecting program %s (haId=%s)",

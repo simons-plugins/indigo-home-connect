@@ -7,6 +7,8 @@ The controller is driven through a real HomeConnectAPI + ScriptedTransport so th
 request gate / no-retry paths are exercised, not mocked away.
 """
 import json
+import threading
+import time
 from datetime import datetime, timezone
 from unittest.mock import Mock
 
@@ -53,19 +55,33 @@ def make_appliance(connected=True, op="Ready", remote_control=True, remote_start
     return appliance
 
 
-def make_controller(transport, tmp_path, now=None):
+def make_controller(transport, tmp_path, now=None, ready_timeout=25.0):
     clock = Clock()
     api = HomeConnectAPI(
         host="api.home-connect.com", logger=Mock(), connection_factory=transport.factory,
         monotonic=clock.monotonic, sleep=clock.sleep,
         wall_now=lambda: datetime(2026, 8, 2, tzinfo=timezone.utc))
     cache = DiskCache(str(tmp_path / "cache.json"), "test", logger=Mock())
-    controller = Controller(api, cache, logger=Mock(), now=now or Clock().monotonic)
+    controller = Controller(api, cache, logger=Mock(), now=now or Clock().monotonic,
+                            ready_timeout=ready_timeout)
     return controller
 
 
 def puts(transport):
     return [r for r in transport.requests if r["method"] == "PUT"]
+
+
+def methods_urls(transport):
+    return [(r["method"], r["url"]) for r in transport.requests]
+
+
+def _wait_until(predicate, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -312,9 +328,12 @@ def test_send_command_refused_when_disconnected(tmp_path):
 # ---------------------------------------------------------------------------
 # Power-constraint gating (Dryer read-only)
 # ---------------------------------------------------------------------------
-def _queue_power(transport, *allowed):
+def _queue_power(transport, *allowed, access=None):
+    constraints = {"allowedvalues": [_power(a) for a in allowed]}
+    if access is not None:
+        constraints["access"] = access
     body = json.dumps({"data": {"key": POWER_STATE_KEY, "value": _power("On"),
-                                "constraints": {"allowedvalues": [_power(a) for a in allowed]}}})
+                                "constraints": constraints}})
     transport.queue(200, HC_JSON, body)
 
 
@@ -337,6 +356,134 @@ def test_power_off_allowed_when_in_constraints(tmp_path):
     assert sent[0]["url"] == f"/api/homeappliances/{HAID}/settings/{POWER_STATE_KEY}"
     body = json.loads(sent[0]["body"])
     assert body["data"] == {"key": POWER_STATE_KEY, "value": _power("Off")}
+
+
+# ---------------------------------------------------------------------------
+# Auto power-on (dishwasher self-off) — start_program(power_on_first=True)
+# ---------------------------------------------------------------------------
+def _off_appliance():
+    # Off dishwasher: reports PowerState Off / OperationState Inactive, remote
+    # flags off (they only mean anything once the appliance is on).
+    return make_appliance(power="Off", op="Inactive", remote_control=False, remote_start=False)
+
+
+def test_auto_power_on_full_sequence(tmp_path):
+    transport = ScriptedTransport()
+    _queue_power(transport, "Off", "On", access="readWrite")   # GET constraints
+    transport.queue(204, HC_JSON, b"")                         # PUT PowerState=On
+    transport.queue(204, HC_JSON, b"")                         # PUT programs/active
+    controller = make_controller(transport, tmp_path, ready_timeout=2.0)
+    appliance = _off_appliance()
+
+    def fire():
+        # Simulate the SSE Ready + remote-flags event arriving after power-on.
+        _wait_until(lambda: any(r["method"] == "PUT" and "settings" in r["url"]
+                                for r in transport.requests))
+        appliance.merge_items([
+            {"key": POWER_STATE_KEY, "value": _power("On")},
+            {"key": REMOTE_CONTROL, "value": True},
+            {"key": REMOTE_START, "value": True},
+            {"key": OPERATION_STATE, "value": _op("Ready")},
+        ])
+
+    thread = threading.Thread(target=fire)
+    thread.start()
+    controller.start_program(appliance, "Dishcare.Dishwasher.Program.Auto2", power_on_first=True)
+    thread.join(timeout=5)
+
+    # Exact sequence: read constraints -> power on -> (Ready) -> start.
+    assert methods_urls(transport) == [
+        ("GET", f"/api/homeappliances/{HAID}/settings/{POWER_STATE_KEY}"),
+        ("PUT", f"/api/homeappliances/{HAID}/settings/{POWER_STATE_KEY}"),
+        ("PUT", f"/api/homeappliances/{HAID}/programs/active"),
+    ]
+    assert json.loads(transport.requests[1]["body"])["data"] == {"key": POWER_STATE_KEY,
+                                                                 "value": _power("On")}
+    assert json.loads(transport.requests[2]["body"])["data"]["key"] == \
+        "Dishcare.Dishwasher.Program.Auto2"
+    # The power-on PUT is not a program start: exactly one start-limiter slot used.
+    assert len(controller._start_limiter._events) == 1
+
+
+def test_auto_power_on_ready_timeout_refuses_no_start(tmp_path):
+    transport = ScriptedTransport()
+    _queue_power(transport, "Off", "On", access="readWrite")
+    transport.queue(204, HC_JSON, b"")                         # PUT PowerState=On
+    controller = make_controller(transport, tmp_path, ready_timeout=0.1)
+    with pytest.raises(ControlRefused) as exc:
+        controller.start_program(_off_appliance(), "P", power_on_first=True)   # Ready never arrives
+    assert "did not become Ready" in exc.value.reason
+    assert methods_urls(transport) == [
+        ("GET", f"/api/homeappliances/{HAID}/settings/{POWER_STATE_KEY}"),
+        ("PUT", f"/api/homeappliances/{HAID}/settings/{POWER_STATE_KEY}"),
+    ]                                                           # NO programs/active
+
+
+def test_auto_power_on_refused_when_power_read_only(tmp_path):
+    transport = ScriptedTransport()
+    _queue_power(transport, "Off", "On", access="read")        # power is read-only
+    controller = make_controller(transport, tmp_path)
+    with pytest.raises(ControlRefused) as exc:
+        controller.start_program(_off_appliance(), "P", power_on_first=True)
+    assert "cannot be powered on remotely" in exc.value.reason
+    assert puts(transport) == []                               # constraints GET only, no PUT
+
+
+def test_power_on_first_false_gives_normal_refusal_no_power_put(tmp_path):
+    transport = ScriptedTransport()
+    controller = make_controller(transport, tmp_path)
+    # power_on_first defaults False -> the normal guard rails run against the off
+    # appliance and refuse (here on Remote Control, off because the appliance is
+    # off); crucially no power-on is attempted.
+    with pytest.raises(ControlRefused):
+        controller.start_program(_off_appliance(), "P")
+    assert transport.requests == []                            # no power GET/PUT at all
+
+
+def test_auto_power_on_power_put_409_surfaced_no_start(tmp_path):
+    transport = ScriptedTransport()
+    _queue_power(transport, "Off", "On", access="readWrite")
+    transport.queue(409, HC_JSON, json.dumps({"error": {"key": "Conflict"}}))   # PUT PowerState
+    controller = make_controller(transport, tmp_path)
+    with pytest.raises(HomeConnectError):
+        controller.start_program(_off_appliance(), "P", power_on_first=True)
+    assert methods_urls(transport) == [
+        ("GET", f"/api/homeappliances/{HAID}/settings/{POWER_STATE_KEY}"),
+        ("PUT", f"/api/homeappliances/{HAID}/settings/{POWER_STATE_KEY}"),
+    ]                                                           # 409 on power-on, never started
+
+
+def test_power_on_first_noop_when_already_on(tmp_path):
+    transport = ScriptedTransport()
+    transport.queue(204, HC_JSON, b"")                         # only the start PUT
+    controller = make_controller(transport, tmp_path)
+    controller.start_program(make_appliance(), "P", power_on_first=True)   # already On + Ready
+    assert methods_urls(transport) == [("PUT", f"/api/homeappliances/{HAID}/programs/active")]
+
+
+def test_select_auto_power_on_then_selects(tmp_path):
+    transport = ScriptedTransport()
+    _queue_power(transport, "Off", "On", access="readWrite")
+    transport.queue(204, HC_JSON, b"")                         # PUT PowerState=On
+    transport.queue(204, HC_JSON, b"")                         # PUT programs/selected
+    controller = make_controller(transport, tmp_path, ready_timeout=2.0)
+    appliance = _off_appliance()
+
+    def fire():
+        _wait_until(lambda: any(r["method"] == "PUT" and "settings" in r["url"]
+                                for r in transport.requests))
+        appliance.merge_items([{"key": POWER_STATE_KEY, "value": _power("On")},
+                               {"key": OPERATION_STATE, "value": _op("Ready")}])
+
+    thread = threading.Thread(target=fire)
+    thread.start()
+    controller.select_program(appliance, "P", power_on_first=True)
+    thread.join(timeout=5)
+    assert methods_urls(transport) == [
+        ("GET", f"/api/homeappliances/{HAID}/settings/{POWER_STATE_KEY}"),
+        ("PUT", f"/api/homeappliances/{HAID}/settings/{POWER_STATE_KEY}"),
+        ("PUT", f"/api/homeappliances/{HAID}/programs/selected"),
+    ]
 
 
 # ---------------------------------------------------------------------------
