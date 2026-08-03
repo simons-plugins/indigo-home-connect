@@ -70,6 +70,8 @@ class Plugin(indigo.PluginBase):
     def shutdown(self):
         self._stop_auth.set()
         with self._coord_lock:
+            if self._api is not None:
+                self._api.abort()     # unblock any thread waiting out the rate-limit gate
             self._stop_coordinator()
         self.logger.info("Home Connect plugin stopped")
 
@@ -100,7 +102,14 @@ class Plugin(indigo.PluginBase):
         with self._coord_lock:
             authorized = bool(self._auth) and self._auth.state() == STATE_AUTHORIZED
             if not authorized:
+                had_coordinator = self._coordinator is not None
                 self._stop_coordinator()
+                # Auth died while devices were live: surface it on every bridged
+                # device — otherwise they freeze at their last healthy-looking
+                # state indefinitely and triggers on `connected` never fire.
+                if had_coordinator and bool(self._auth) \
+                        and self._auth.state() == STATE_AUTH_REQUIRED:
+                    self._mark_devices_auth_required()
                 return
             if self._coordinator is not None and self._coordinator_api is not self._api:
                 if not self._stop_coordinator():
@@ -125,6 +134,12 @@ class Plugin(indigo.PluginBase):
                 self._coordinator_api = api
         except Exception as exc:  # pylint: disable=broad-except
             self.logger.exception(exc)
+
+    def _mark_devices_auth_required(self):
+        with self._dev_lock:
+            bridges = list(self._bridges.values())
+        for bridge in bridges:
+            bridge.mark_auth_required()
 
     def _stop_coordinator(self):
         """Stop the coordinator; return True only if it fully stopped. On a
@@ -175,8 +190,16 @@ class Plugin(indigo.PluginBase):
         client_secret = self.pluginPrefs.get("clientSecret", "").strip()
         simulator = self.pluginPrefs.get("useSimulator", False)
         with self._coord_lock:
+            if self._auth is not None and self._auth.matches(client_id, client_secret, simulator):
+                # Unchanged client: a no-op supersession. Keep the auth instance
+                # (a device-flow authorization may be pending on it — marking it
+                # stale would discard the granted token), the running stream and
+                # the controller's rate-limiter windows.
+                return
             if self._auth is not None:
                 self._auth.mark_stale()   # a late worker from the old instance must not persist
+            if self._api is not None:
+                self._api.abort()         # unblock threads stuck at the old client's gate
             # Tear down any running stream; it is bound to the old api/host. The
             # supervisor (or startup) restarts it against the rebuilt client.
             self._stop_coordinator()
@@ -204,11 +227,11 @@ class Plugin(indigo.PluginBase):
         # Stop any in-flight authorization before starting a new one.
         self._stop_auth.set()
         self._stop_auth = threading.Event()
-        if self._auth is not None:
-            self._auth.mark_stale()       # old worker must not persist a superseded result
-
-        api, auth = self._build_client(client_id, client_secret, simulator)
-        self._api, self._auth = api, auth
+        with self._coord_lock:
+            if self._auth is not None:
+                self._auth.mark_stale()   # old worker must not persist a superseded result
+            api, auth = self._build_client(client_id, client_secret, simulator)
+            self._api, self._auth = api, auth
 
         try:
             if simulator:
@@ -252,7 +275,10 @@ class Plugin(indigo.PluginBase):
 
     def closedPrefsConfigUi(self, valuesDict, userCancelled):  # noqa: N803
         if userCancelled:
-            self._stop_auth.set()
+            # The dialog is documented as closable while a device-flow
+            # authorization completes in the background — leave the worker
+            # running; the granted token is applied when it arrives. A new
+            # Authorize press supersedes it, and the code expires on its own.
             return
         self.debug = valuesDict.get("showDebugInfo", False)
         self._rebuild_client()

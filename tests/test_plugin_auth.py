@@ -53,3 +53,15 @@ def test_authorize_button_device_flow_shows_code_and_starts_worker(monkeypatch):
     thread = p._auth_thread                 # pylint: disable=protected-access
     assert thread is not None
     thread.join(timeout=2)
+
+
+def test_cancel_close_leaves_device_flow_worker_running(monkeypatch):
+    # The dialog is documented as closable while authorization completes in the
+    # background: Cancel must not kill the polling worker (the granted token
+    # would be silently discarded and the device code is spent server-side).
+    p = _plugin()
+    monkeypatch.setattr(p, "_build_client", lambda cid, sec, sim: (object(), _FakeAuthDeviceFlow()))
+    p.authorizeButtonPressed({"clientId": "abc", "useSimulator": False})
+    stop_event = p._stop_auth               # pylint: disable=protected-access
+    p.closedPrefsConfigUi({}, userCancelled=True)
+    assert not stop_event.is_set()
