@@ -228,13 +228,23 @@ class ApplianceBridge:
             if appliance is None:
                 return
             snapshot = appliance.state_snapshot()
-            updates, new_dynamic = self._build_updates(snapshot)
+            updates, new_dynamic_updates, new_dynamic = self._build_updates(snapshot)
+            registered = True
             if new_dynamic:
-                self._register_dynamic(new_dynamic)
+                registered = self._register_dynamic(new_dynamic)
+            # Known states first, in their own batch: a failed registration (or
+            # an Indigo that hasn't rebuilt the state list yet) must never take
+            # operationState/status down with it (#17).
             try:
                 self.device.updateStatesOnServer(updates)
             except Exception:  # pylint: disable=broad-except
                 self._logger.exception("Home Connect %s: state push failed", self._ctx())
+            if registered and new_dynamic_updates:
+                try:
+                    self.device.updateStatesOnServer(new_dynamic_updates)
+                except Exception:  # pylint: disable=broad-except
+                    self._logger.exception("Home Connect %s: dynamic-state push failed "
+                                           "(retried on next update)", self._ctx())
             if not self._active:
                 return                        # the write detached us; skip policy
             self._apply_connection_policy(snapshot)
@@ -245,6 +255,7 @@ class ApplianceBridge:
 
     def _build_updates(self, snapshot):
         updates = []
+        new_dynamic_updates = []              # values for keys registered THIS push
         new_dynamic = []
         for bsh_key, value in snapshot.items():
             spec = hc.spec_for(self.device_type_id, bsh_key)
@@ -258,9 +269,12 @@ class ApplianceBridge:
                     continue
                 if sid in self._base_ids:
                     continue
+                entry = {"key": sid, "value": _stringify(value), "uiValue": _stringify(value)}
                 if sid not in self._dynamic_ids:
                     new_dynamic.append(sid)
-                updates.append({"key": sid, "value": _stringify(value), "uiValue": _stringify(value)})
+                    new_dynamic_updates.append(entry)
+                else:
+                    updates.append(entry)
 
         # Derived: formatted remaining time, last event, and the summary. Keyed on
         # presence (not truthiness) so a null RemainingProgramTime at program end
@@ -276,7 +290,7 @@ class ApplianceBridge:
         updates.append({"key": "lastEventTime", "value": last_event_time, "uiValue": last_event_time})
         summary = summarize_status(snapshot, self._treat_disconnected_as_off, self._last_event)
         updates.append({"key": "status", "value": summary, "uiValue": summary})
-        return updates, new_dynamic
+        return updates, new_dynamic_updates, new_dynamic
 
     # Safe cleared value per kind when Home Connect sends null to remove a key
     # (e.g. RemainingProgramTime / ActiveProgram vanish at program end). Real
@@ -312,12 +326,15 @@ class ApplianceBridge:
         the registration instead of forever emitting an unregistered key. A
         rollback write that itself fails is logged at warning (not swallowed):
         rolled-back and rollback-failed are different states.
+
+        Returns True when the registration landed (the caller may then write the
+        new keys' values); False when it failed and was rolled back.
         """
         with self._lock:
             previous = set(self._dynamic_ids)
             merged = sorted(self._dynamic_ids | set(new_ids))
             if merged == sorted(previous):
-                return
+                return True
             self._dynamic_ids = set(merged)
         props = dict(self.device.pluginProps)
         before = props.get(_DYNAMIC_PROP, "")
@@ -325,6 +342,7 @@ class ApplianceBridge:
         try:
             self.device.replacePluginPropsOnServer(props)
             self.device.stateListOrDisplayStateIdChanged()
+            return True
         except Exception:  # pylint: disable=broad-except
             # Restore in-memory state too, or registration never retries.
             with self._lock:
@@ -338,6 +356,7 @@ class ApplianceBridge:
             except Exception:  # pylint: disable=broad-except
                 self._logger.warning("Home Connect %s: rollback of dynamic-state props "
                                      "also failed", self._ctx())
+            return False
 
     def _apply_connection_policy(self, snapshot):
         connected = snapshot.get(CONNECTED)
