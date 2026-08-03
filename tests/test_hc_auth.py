@@ -399,3 +399,44 @@ def test_concurrent_refresh_submits_exactly_once(tmp_path):
     assert len(refresh_posts) == 1                        # single-use token submitted once
     assert all(results)                                  # both callers see a fresh token
     assert auth.authorization_header() == "A2"
+
+
+# -- Red-team wave 1: refresh backoff (#14) + matches (#9) --------------------
+
+def test_refresh_generic_failure_backs_off_exponentially(tmp_path):
+    # A broken secret / persistent 500 must not be retried every supervisor
+    # tick: the token endpoint allows only 10/min and 100/day.
+    api = FakeAPI()
+    t = {"now": 1_000.0}
+    auth = make_auth(api, tmp_path, now=lambda: t["now"])
+    auth._store_token(token_response())                    # seed an authorized state
+
+    api.queue_post(oauth_error("server_error", status=500))
+    assert auth.refresh_if_needed(force=True) is False
+    assert len(api.post_calls) == 1
+
+    t["now"] += 10                                         # inside the 60s backoff
+    assert auth.refresh_if_needed(force=True) is False
+    assert len(api.post_calls) == 1                        # no HTTP
+
+    t["now"] += 60                                         # backoff expired: retried
+    api.queue_post(oauth_error("server_error", status=500))
+    assert auth.refresh_if_needed(force=True) is False
+    assert len(api.post_calls) == 2
+
+    t["now"] += 100                                        # 100 < doubled 120s backoff
+    assert auth.refresh_if_needed(force=True) is False
+    assert len(api.post_calls) == 2
+
+    t["now"] += 30                                         # backoff over; success resets
+    api.queue_post(token_response(access="ACCESS-2", refresh="REFRESH-2"))
+    assert auth.refresh_if_needed(force=True) is True
+    assert auth.authorization_header() == "ACCESS-2"
+
+
+def test_matches_compares_full_client_config(tmp_path):
+    auth = make_auth(FakeAPI(), tmp_path, client_id=CLIENT_A, secret="s1", simulator=False)
+    assert auth.matches(CLIENT_A, "s1", False)
+    assert not auth.matches(CLIENT_B, "s1", False)
+    assert not auth.matches(CLIENT_A, "s2", False)
+    assert not auth.matches(CLIENT_A, "s1", True)
