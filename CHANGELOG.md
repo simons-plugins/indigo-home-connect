@@ -5,6 +5,29 @@ All notable changes to the Home Connect plugin. Format loosely follows
 convention). Versions `2026.0.x` were the phased internal build-up; **`2026.1.0`** is the
 first release of the complete, user-visible feature set.
 
+## [2026.1.2] — 2026-08-03
+
+### Added
+- **Auto power-on for Start / Select Program.** Many dishwashers power themselves off after a
+  cycle and on door events, which left a scheduled *Start Program* refused as *"not ready"*. A
+  new **Power on first if needed** checkbox (on both actions, on by default) powers the
+  appliance on and waits — **event-driven, no polling** — for `OperationState = Ready` (25 s
+  timeout) before running the guard rails and starting. The power-on `PowerState = On` PUT is a
+  normal idempotent write (not a program start; the start limiter still counts once).
+  - Refuses with an actionable message when power is **not remotely writable** (read-only power,
+    e.g. some dryers — *"cannot be powered on remotely — press its power button"*) or the
+    appliance **never becomes Ready**, and in both cases does **not** attempt the start.
+  - Power-on cannot grant Remote Start (still the appliance's 24-hour rule); already-on
+    appliances take the zero-extra-request happy path. `Standby` is treated as on and is
+    **not** woken by this option (only `Off`/`Inactive`).
+
+### Changed
+- **Start-watch window 15 s → 60 s**, and its message now reflects uncertainty rather than
+  failure (*"has not reported starting after 60s — it may still begin…"*). A real appliance
+  runs pre-start water/door checks and reports state over the cloud SSE stream, so the 15 s
+  window produced a false-negative "did not start" warning on a start that was actually
+  succeeding (seen on Simon's first real hardware Start).
+
 ## [2026.1.0] — 2026-08-03
 
 Phase 5 — final polish and full user documentation. First minor release: the plugin is now

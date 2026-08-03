@@ -186,7 +186,7 @@ request budget.
 
 | Action | What it does | Preconditions (checked locally) |
 |---|---|---|
-| **Start Program** | Starts a program now | Connected · Remote Control on · Remote Start allowed · not locally controlled · `operationState = Ready` |
+| **Start Program** | Starts a program now (optionally powering the appliance on first) | Connected · Remote Control on · Remote Start allowed · not locally controlled · `operationState = Ready` |
 | **Select Program** | Stages a program without starting | Connected · powered on |
 | **Stop Program** | Aborts the active program | Connected · a program is active or paused |
 | **Pause Program** | Pauses (if supported) | Connected · appliance exposes the Pause command |
@@ -199,6 +199,16 @@ request budget.
 program list) and an optional **Option overrides** field — one `key=value` per line, e.g.
 `BSH.Common.Option.StartInRelative=3600`. Values coerce to `true`/`false` (bool), whole
 numbers (int), otherwise text. Leave it blank to start with the program's defaults.
+
+Both dialogs also have a **Power on first if needed** checkbox (on by default). Many
+dishwashers power themselves off after a cycle and on door events, which would otherwise
+leave a scheduled *Start Program* refused as *"not ready"*. With this ticked, the plugin
+powers the appliance on and waits for it to become *Ready* before starting — so a schedule
+works even if the machine has switched itself off. Power-on **cannot** grant Remote Start
+(you still enable that on the appliance — see the [24-hour rule](#remote-start-the-24-hour-rule)),
+and appliances whose power is **read-only** (some dryers) cannot be powered on remotely and
+are refused with a clear message. Only a powered-**off** (or `Inactive`) appliance is woken —
+`Standby` is treated as on and is not woken by this option.
 
 Menus for programs, commands and power states are served from a 24-hour capability cache,
 so opening an action dialog costs at most one request the first time that day.
@@ -280,6 +290,16 @@ the dial (or none). The plugin works around this by listing the appliance's **fu
 program set and marking entries *(not currently available)* rather than the momentary
 available-list — but the appliance must be **on** and reachable. Power the appliance on
 (open the door after a finished cycle) and reopen the action dialog.
+
+**The appliance turns itself off, so scheduled starts are refused as "not ready".**
+Many dishwashers power down after a finished cycle and on door events. A *Start Program*
+guard rail requires `operationState = Ready`, so it refuses while the machine is off. Leave
+the **Power on first if needed** checkbox ticked on the Start (and Select) action — the
+plugin powers the appliance on and waits for *Ready* before starting. Note the two limits:
+the appliance must still have **Remote Start** enabled (power-on cannot grant it — see the
+[24-hour rule](#remote-start-the-24-hour-rule)), and appliances whose **power is read-only**
+cannot be powered on remotely (you get *"cannot be powered on remotely — press its power
+button"*).
 
 **A control action fails with a "409" / conflict.**
 The appliance rejected the request. Common causes and fixes:

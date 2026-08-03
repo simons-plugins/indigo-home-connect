@@ -30,7 +30,7 @@ from hc_api import HomeConnectAPI, HomeConnectError, SIMULATOR_HOST, redact  # n
 from hc_appliance import OPERATION_STATE  # noqa: E402
 from hc_auth import HomeConnectAuth  # noqa: E402
 from hc_cache import DiskCache  # noqa: E402
-from hc_control import Controller, ControlRefused  # noqa: E402
+from hc_control import Controller, ControlRefused, POWER_STATE_KEY  # noqa: E402
 from hc_events import HomeConnectCoordinator  # noqa: E402
 import hc_constants as hc  # noqa: E402
 
@@ -79,6 +79,29 @@ def report(step, ok, detail=""):
     print(f"  [{mark}] {step}{': ' + detail if detail else ''}")
 
 
+def _power_cycle_off(controller, dishwasher):
+    """Power the simulator dishwasher OFF so the auto-power-on path has work to do.
+
+    Returns True (use power_on_first) if the appliance reached an off state, else
+    False with a note — some simulator appliances do not honor PowerState=Off."""
+    off_value = "BSH.Common.EnumType.PowerState.Off"
+    print("Power-cycle: powering the dishwasher OFF…")
+    try:
+        controller.set_power(dishwasher, off_value)
+    except (ControlRefused, HomeConnectError) as exc:
+        print(f"  (could not power off — {exc}); skipping auto-power-on, running normally\n")
+        return False
+    went_off = wait_for(
+        lambda: hc.enum_tail(dishwasher.get(POWER_STATE_KEY)) == "Off"
+        or op_tail(dishwasher) == "Inactive", 15)
+    if went_off:
+        print(f"  dishwasher is off (power={hc.enum_tail(dishwasher.get(POWER_STATE_KEY))}, "
+              f"op={op_tail(dishwasher) or 'unknown'}); Start will auto-power-on\n")
+        return True
+    print("  (simulator did not report the dishwasher off; running without auto-power-on)\n")
+    return False
+
+
 def try_step(step, fn):
     """Run a control step; report success / ControlRefused / API error uniformly."""
     try:
@@ -95,6 +118,8 @@ def try_step(step, fn):
 def main():
     parser = argparse.ArgumentParser(description="Home Connect simulator control check")
     parser.add_argument("--debug", action="store_true", help="verbose hc_* logging")
+    parser.add_argument("--power-cycle", action="store_true",
+                        help="power the dishwasher off first, then exercise Start's auto-power-on")
     args = parser.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.WARNING,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -150,9 +175,19 @@ def main():
         program_key = (usable or programs or [{"key": "BSH.Common.Program.Favorite.001"}])[0]["key"]
         print(f"Using program: {hc.enum_tail(program_key)}\n")
 
+        # Optional auto-power-on exercise: power the simulator dishwasher OFF, then
+        # let Start Program's power_on_first path bring it back before starting.
+        power_on_first = False
+        if args.power_cycle:
+            power_on_first = _power_cycle_off(controller, dishwasher)
+
         print("Control sequence:")
-        try_step("select program", lambda: controller.select_program(dishwasher, program_key))
-        started = try_step("start program", lambda: controller.start_program(dishwasher, program_key))
+        try_step("select program",
+                 lambda: controller.select_program(dishwasher, program_key,
+                                                   power_on_first=power_on_first))
+        started = try_step("start program",
+                           lambda: controller.start_program(dishwasher, program_key,
+                                                            power_on_first=power_on_first))
 
         if started:
             reached = wait_for(lambda: op_tail(dishwasher) in ("Run", "DelayedStart"), STATE_TIMEOUT)
