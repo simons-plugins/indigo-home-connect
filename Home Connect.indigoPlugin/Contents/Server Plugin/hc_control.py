@@ -35,7 +35,7 @@ from collections import deque
 import hc_constants as hc
 from hc_api import HomeConnectError, redact
 from hc_appliance import (LOCAL_CONTROL, OPERATION_STATE, REMOTE_CONTROL,
-                          REMOTE_START)
+                          REMOTE_START, SELECTED_PROGRAM)
 
 # -- BSH keys we drive -------------------------------------------------------
 POWER_STATE_KEY = "BSH.Common.Setting.PowerState"
@@ -70,6 +70,12 @@ START_WATCH_DELAY = 60.0
 # How long auto-power-on waits (event-driven) for OperationState to reach Ready
 # after powering an appliance on, before giving up. Injectable for tests.
 READY_TIMEOUT = 25.0
+
+# How long a ValueWatch waits for an accepted setting/power/select write to be
+# reflected over SSE before warning. Cloud lag can run to minutes (observed
+# 11 min burst on real hardware), so like StartWatch this warns with
+# uncertainty, not certainty.
+VALUE_WATCH_DELAY = 60.0
 
 # Refuse control/capability HTTP locally when the shared request gate is closed
 # for longer than this. Real 429 blocks carry Retry-After values from minutes to
@@ -179,6 +185,68 @@ class StartWatch:
 
 
 # ---------------------------------------------------------------------------
+# One-shot value watch (settings / power / select — the StartWatch analogue)
+# ---------------------------------------------------------------------------
+class ValueWatch:
+    """After an accepted write, warn if the value never takes effect.
+
+    Home Connect 2xx-accepts a PUT and can still drop it appliance-side
+    (disconnected mid-flight, local operation, invalid combination) with no
+    error response (#18). Registers a one-shot observer on ``key``; an observed
+    change to ``expected`` cancels the warning, otherwise the delayed check
+    compares the cache and logs a warning naming the discrepancy. Same
+    lifecycle discipline as :class:`StartWatch` (exception-guarded timeout,
+    unsubscribe in ``finally``)."""
+
+    def __init__(self, appliance, key, expected, schedule, logger=None,
+                 delay=VALUE_WATCH_DELAY, describe=None):
+        self._appliance = appliance
+        self._key = key
+        self._expected = expected
+        self._describe = describe or hc.enum_tail(key)
+        self._logger = logger or logging.getLogger("hc_control")
+        self._delay = delay
+        self._lock = threading.Lock()
+        self._done = False
+        appliance.subscribe(key, self._on_change)
+        schedule(self._timeout, delay)
+
+    @staticmethod
+    def _matches(current, expected):
+        return current == expected or str(current) == str(expected)
+
+    def _on_change(self, key, value):  # noqa: ARG002 - key is the subscribed key
+        if self._matches(value, self._expected):
+            self._finish()
+
+    def _timeout(self):
+        try:
+            with self._lock:
+                if self._done:
+                    return
+            current = self._appliance.get(self._key)
+            if not self._matches(current, self._expected):
+                self._logger.warning(
+                    "Home Connect %s: %s was accepted but has not taken effect after %ds "
+                    "(wanted %s, appliance reports %s) — check the appliance",
+                    self._appliance.name, self._describe, int(self._delay),
+                    hc.enum_tail(self._expected) or self._expected,
+                    hc.enum_tail(current) or current or "nothing")
+        except Exception:  # pylint: disable=broad-except
+            self._logger.exception("Home Connect %s: value-watch check failed",
+                                   self._appliance.name)
+        finally:
+            self._finish()
+
+    def _finish(self):
+        with self._lock:
+            if self._done:
+                return
+            self._done = True
+        self._appliance.unsubscribe(self._key, self._on_change)
+
+
+# ---------------------------------------------------------------------------
 # Value coercion for freeform option / setting fields
 # ---------------------------------------------------------------------------
 def coerce_value(raw):
@@ -272,21 +340,31 @@ class Controller:
     @classmethod
     def _require_remote_start(cls, appliance):
         """Full remote-start pre-flight (PRD §2): connected, remote control on,
-        remote start allowed, not locally controlled, OperationState=Ready."""
+        remote start allowed, not locally controlled, OperationState=Ready.
+
+        UNKNOWN (never reported — e.g. right after a plugin restart, before the
+        re-read lands) is NOT refused: refusing on None produced a false
+        "enable Remote Control on the appliance" for a setting that was fine
+        (#19). The request goes through and a genuine refusal comes back as a
+        409 with the actionable hint. Only a value the appliance actually
+        REPORTED as off/false refuses locally."""
         cls._require_connected(appliance)
         if hc.to_bool(appliance.get(LOCAL_CONTROL)):
             raise ControlRefused(f"{appliance.name} is being controlled at the appliance")
-        if not hc.to_bool(appliance.get(REMOTE_CONTROL)):
+        remote_control = appliance.get(REMOTE_CONTROL)
+        if remote_control is not None and not hc.to_bool(remote_control):
             raise ControlRefused(
                 f"Remote Control is not active on {appliance.name} — enable it on the appliance")
-        if not hc.to_bool(appliance.get(REMOTE_START)):
+        remote_start = appliance.get(REMOTE_START)
+        if remote_start is not None and not hc.to_bool(remote_start):
             raise ControlRefused(
                 f"Remote Start is not allowed on {appliance.name} — enable it on the appliance "
                 "(it auto-expires ~24h after you enable it)")
-        op = hc.enum_tail(appliance.get(OPERATION_STATE))
-        if op != _READY_STATE:
+        op_raw = appliance.get(OPERATION_STATE)
+        op = hc.enum_tail(op_raw)
+        if op_raw is not None and op != _READY_STATE:
             raise ControlRefused(
-                f"{appliance.name} is not ready to start (operation state {op or 'unknown'})")
+                f"{appliance.name} is not ready to start (operation state {op})")
 
     @classmethod
     def _require_powered(cls, appliance):
