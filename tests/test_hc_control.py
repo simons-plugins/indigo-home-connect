@@ -561,14 +561,22 @@ def test_available_commands_404_cached_as_empty(tmp_path):
 # ---------------------------------------------------------------------------
 # Start watch (observer API + delayed check)
 # ---------------------------------------------------------------------------
+def test_start_watch_default_window_is_60s():
+    assert hc_control.START_WATCH_DELAY == 60.0
+
+
 def test_start_watch_warns_if_still_ready_after_timeout():
     appliance = make_appliance(op="Ready")
     scheduler = RecordingScheduler()
     logger = Mock()
-    StartWatch(appliance, scheduler.post, logger=logger, delay=15)
+    StartWatch(appliance, scheduler.post, logger=logger, delay=60)
     scheduler.run_all()                                   # fire the timeout while still Ready
     assert logger.warning.called
-    assert "did not start" in logger.warning.call_args[0][0]
+    message = logger.warning.call_args[0][0]
+    # Uncertainty, not failure — the start may still begin.
+    assert "has not reported starting" in message
+    assert "may still begin" in message
+    assert "did not start" not in message
 
 
 @pytest.mark.parametrize("state", ["Run", "DelayedStart"])
@@ -576,7 +584,7 @@ def test_start_watch_silent_when_program_starts(state):
     appliance = make_appliance(op="Ready")
     scheduler = RecordingScheduler()
     logger = Mock()
-    StartWatch(appliance, scheduler.post, logger=logger, delay=15)
+    StartWatch(appliance, scheduler.post, logger=logger, delay=60)
     # SSE reports the appliance reached a started state before the timeout fires:
     appliance.merge_items([{"key": OPERATION_STATE, "value": _op(state)}])
     scheduler.run_all()
@@ -588,7 +596,7 @@ def test_start_watch_timeout_exception_safe_and_unsubscribes():
     appliance = make_appliance(op="Ready")
     scheduler = RecordingScheduler()
     logger = Mock()
-    StartWatch(appliance, scheduler.post, logger=logger, delay=15)
+    StartWatch(appliance, scheduler.post, logger=logger, delay=60)
     # Simulate a torn-down appliance (e.g. plugin shutdown) so the check raises.
     appliance.get = Mock(side_effect=RuntimeError("appliance gone"))
     scheduler.run_all()                                # timer fires -> must not raise

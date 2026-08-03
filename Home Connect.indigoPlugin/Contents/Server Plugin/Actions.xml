@@ -27,7 +27,7 @@
 				<Label>Power on first if needed:</Label>
 			</Field>
 			<Field id="powerOnFirstHelp" type="label" fontSize="small" alignWithControl="true">
-				<Label>Many dishwashers power themselves off after a cycle and on door events, which would otherwise leave a scheduled start refused as "not ready". With this ticked, the plugin powers the appliance on and waits for it to become Ready before starting. Power-on cannot grant Remote Start — you must still enable that on the appliance (it auto-expires ~24h). Appliances whose power is read-only cannot be powered on remotely.</Label>
+				<Label>Many dishwashers power themselves off after a cycle and on door events, which would otherwise leave a scheduled start refused as "not ready". With this ticked, the plugin powers the appliance on and waits for it to become Ready before starting. Only an off (or Inactive) appliance is woken — Standby is treated as on and is not woken. Power-on cannot grant Remote Start — you must still enable that on the appliance (it auto-expires ~24h). Appliances whose power is read-only cannot be powered on remotely.</Label>
 			</Field>
 		</ConfigUI>
 	</Action>
@@ -50,7 +50,7 @@
 				<Label>Power on first if needed:</Label>
 			</Field>
 			<Field id="powerOnFirstHelp" type="label" fontSize="small" alignWithControl="true">
-				<Label>If the appliance is off (dishwashers self-off after a cycle), power it on and wait for Ready before selecting. Appliances whose power is read-only cannot be powered on remotely.</Label>
+				<Label>If the appliance is off (dishwashers self-off after a cycle), power it on and wait for Ready before selecting. Only an off (or Inactive) appliance is woken — Standby is treated as on and is not woken. Appliances whose power is read-only cannot be powered on remotely.</Label>
 			</Field>
 		</ConfigUI>
 	</Action>

@@ -58,7 +58,10 @@ STOP_LIMIT = 5
 RATE_WINDOW = 60.0
 
 # How long after a start we allow the appliance to leave Ready before warning.
-START_WATCH_DELAY = 15.0
+# 60s (not 15s): real appliances run pre-start water/door checks and the state
+# change reaches us over the cloud SSE stream, so a shorter window fired a
+# false-negative "did not start" warning on a start that was actually succeeding.
+START_WATCH_DELAY = 60.0
 
 # How long auto-power-on waits (event-driven) for OperationState to reach Ready
 # after powering an appliance on, before giving up. Injectable for tests.
@@ -116,11 +119,13 @@ class StartWatch:
     Registers a one-shot observer on ``OperationState`` (fires as soon as the
     SSE stream reports Run/DelayedStart) and schedules a fallback check. Whichever
     happens first wins: an observed move cancels the warning; the timeout, if the
-    appliance has not reached Run/DelayedStart, logs a warning (a start can fail
-    appliance-side — door open, empty water tank — with no error returned to the
-    caller). The timeout body is exception-guarded and always unsubscribes in a
-    ``finally``, so the observer never dangles even if the check itself throws
-    (e.g. during plugin shutdown).
+    appliance has not reached Run/DelayedStart, logs an *uncertainty* warning (the
+    start may still begin — a real appliance runs pre-start water/door checks and
+    the state change reaches us over the cloud SSE stream, so this is not a
+    failure). The window is 60s to avoid the false-negative a shorter window
+    produced on real hardware. The timeout body is exception-guarded and always
+    unsubscribes in a ``finally``, so the observer never dangles even if the check
+    itself throws (e.g. during plugin shutdown).
     """
 
     def __init__(self, appliance, schedule, logger=None, delay=START_WATCH_DELAY):
@@ -147,9 +152,9 @@ class StartWatch:
             current = hc.enum_tail(self._appliance.get(OPERATION_STATE))
             if current not in _STARTED_STATES:
                 self._logger.warning(
-                    "Home Connect %s: program did not start within %ds (operation state %s) — "
-                    "check the door, water supply or tank on the appliance",
-                    self._appliance.name, int(self._delay), current or "unknown")
+                    "Home Connect %s: has not reported starting after %ds (operation state %s) — "
+                    "it may still begin; if not, check the door, water supply or tank on the "
+                    "appliance", self._appliance.name, int(self._delay), current or "unknown")
         except Exception:  # pylint: disable=broad-except
             self._logger.exception("Home Connect %s: start-watch check failed", self._appliance.name)
         finally:

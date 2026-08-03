@@ -207,7 +207,8 @@ powers the appliance on and waits for it to become *Ready* before starting — s
 works even if the machine has switched itself off. Power-on **cannot** grant Remote Start
 (you still enable that on the appliance — see the [24-hour rule](#remote-start-the-24-hour-rule)),
 and appliances whose power is **read-only** (some dryers) cannot be powered on remotely and
-are refused with a clear message.
+are refused with a clear message. Only a powered-**off** (or `Inactive`) appliance is woken —
+`Standby` is treated as on and is not woken by this option.
 
 Menus for programs, commands and power states are served from a 24-hour capability cache,
 so opening an action dialog costs at most one request the first time that day.

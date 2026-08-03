@@ -18,7 +18,15 @@ first release of the complete, user-visible feature set.
     e.g. some dryers — *"cannot be powered on remotely — press its power button"*) or the
     appliance **never becomes Ready**, and in both cases does **not** attempt the start.
   - Power-on cannot grant Remote Start (still the appliance's 24-hour rule); already-on
-    appliances take the zero-extra-request happy path.
+    appliances take the zero-extra-request happy path. `Standby` is treated as on and is
+    **not** woken by this option (only `Off`/`Inactive`).
+
+### Changed
+- **Start-watch window 15 s → 60 s**, and its message now reflects uncertainty rather than
+  failure (*"has not reported starting after 60s — it may still begin…"*). A real appliance
+  runs pre-start water/door checks and reports state over the cloud SSE stream, so the 15 s
+  window produced a false-negative "did not start" warning on a start that was actually
+  succeeding (seen on Simon's first real hardware Start).
 
 ## [2026.1.0] — 2026-08-03
 
