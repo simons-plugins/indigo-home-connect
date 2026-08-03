@@ -275,3 +275,19 @@ def test_device_start_marks_auth_required_when_auth_dead():
     p.deviceStartComm(dev)
     assert dev.states["status"] == "Authorization required"
     assert dev.error_state == "Authorization required"
+
+
+def test_appliance_removed_detaches_and_flags_device():
+    # DEPAIRED / haId churn: the bridge must not stay attached to a dead
+    # appliance object showing "Off" forever.
+    p = _plugin()
+    appliance = _appliance("HA-1", "Dishwasher", "Dishwasher")
+    p._coordinator = _FakeCoord([appliance])
+    dev = _device(11, "dishwasher", "HA-1")
+    p.deviceStartComm(dev)
+    assert p._bridges[dev.id].is_attached
+
+    p._appliance_removed("HA-1")
+    assert not p._bridges[dev.id].is_attached
+    assert dev.error_state == "appliance not found on Home Connect account"
+    assert dev.states["status"] == "Not found"

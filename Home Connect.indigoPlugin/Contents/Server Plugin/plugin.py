@@ -129,6 +129,7 @@ class Plugin(indigo.PluginBase):
         coordinator = HomeConnectCoordinator(
             api, logger=self.logger, on_appliance=self._appliance_discovered,
             on_discovery=self._discovery_complete,
+            on_removed=self._appliance_removed,
             supports_programs_for=_supports_programs_for,
             auth_ok=lambda: auth.state() == STATE_AUTHORIZED)
         try:
@@ -215,8 +216,8 @@ class Plugin(indigo.PluginBase):
         try:
             state = self._auth.state() if self._auth else STATE_UNAUTHORIZED
             values["authStatus"] = _STATE_TEXT.get(state, "")
-        except Exception:  # pylint: disable=broad-except
-            pass
+        except Exception as exc:  # pylint: disable=broad-except
+            self.logger.debug("Home Connect: auth status unavailable for config dialog: %s", exc)
         return values
 
     def authorizeButtonPressed(self, valuesDict, typeId="", devId=0):  # noqa: N803
@@ -345,6 +346,17 @@ class Plugin(indigo.PluginBase):
             bridges = [b for b in self._bridges.values() if b.haid == appliance.haid]
         for bridge in bridges:
             bridge.attach(appliance)
+
+    def _appliance_removed(self, haid):
+        """DEPAIRED, or vanished from a successful discovery pass: detach the
+        bridge and flag the device, instead of leaving it attached to a dead
+        appliance object showing 'Off' forever. If the appliance re-pairs
+        (same or new haId), discovery re-attaches and clears the flag."""
+        with self._dev_lock:
+            bridges = [b for b in self._bridges.values() if b.haid == haid]
+        for bridge in bridges:
+            bridge.detach()
+            bridge.mark_orphaned()
 
     def _discovery_complete(self, known_haids):
         """After a full discovery pass, escalate any device whose configured haId
@@ -478,6 +490,11 @@ class Plugin(indigo.PluginBase):
         def operation(controller, appliance):
             options = hc_control.parse_options(overrides)
             controller.select_program(appliance, program, options, power_on_first=power_on_first)
+            # Accepted != selected (the appliance can drop it silently): watch
+            # the selection converge, mirroring StartWatch.
+            hc_control.ValueWatch(appliance, hc_control.SELECTED_PROGRAM, program,
+                                  self._schedule_later, self.logger,
+                                  describe="program selection")
 
         self._run_control(dev, dev_id, "select program", operation)
 
@@ -501,13 +518,25 @@ class Plugin(indigo.PluginBase):
     def setPowerState(self, action, dev=None):  # noqa: N802,N803
         dev, dev_id = self._resolve_action_device(action, dev)
         value = action.props.get("powerState", "")
-        self._run_control(dev, dev_id, "set power state", lambda c, a: c.set_power(a, value))
+
+        def operation(controller, appliance):
+            controller.set_power(appliance, value)
+            hc_control.ValueWatch(appliance, hc_control.POWER_STATE_KEY, value,
+                                  self._schedule_later, self.logger,
+                                  describe="power state")
+
+        self._run_control(dev, dev_id, "set power state", operation)
 
     def setSetting(self, action, dev=None):  # noqa: N802,N803
         dev, dev_id = self._resolve_action_device(action, dev)
         key = action.props.get("settingKey", "").strip()
         value = hc_control.coerce_value(action.props.get("settingValue", ""))
-        self._run_control(dev, dev_id, "set setting", lambda c, a: c.set_setting(a, key, value))
+
+        def operation(controller, appliance):
+            controller.set_setting(appliance, key, value)
+            hc_control.ValueWatch(appliance, key, value, self._schedule_later, self.logger)
+
+        self._run_control(dev, dev_id, "set setting", operation)
 
     def _run_control(self, dev, dev_id, describe, operation):
         """Resolve the appliance for ``dev`` and run ``operation(controller, appliance)``.

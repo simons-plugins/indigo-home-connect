@@ -404,7 +404,9 @@ class HomeConnectAuth:
         entry = self._store.get(self._client_id)
         if not entry:
             return None
-        return entry["expires_at"] - REFRESH_WINDOW
+        # A hand-edited/truncated entry without expires_at is due immediately —
+        # the refresh rewrites it whole (never a KeyError loop in the supervisor).
+        return (entry.get("expires_at") or 0) - REFRESH_WINDOW
 
     def refresh_if_needed(self, force=False):
         """Refresh the access token if it is within :data:`REFRESH_WINDOW` of
@@ -424,7 +426,7 @@ class HomeConnectAuth:
             if self._state == STATE_AUTH_REQUIRED:
                 return False              # dead refresh token: re-auth required, don't resubmit
             now = self._now()
-            due_at = entry["expires_at"] - REFRESH_WINDOW
+            due_at = (entry.get("expires_at") or 0) - REFRESH_WINDOW
             if not force and now < due_at:
                 return False
             if now < self._refresh_backoff_until:

@@ -5,6 +5,57 @@ All notable changes to the Home Connect plugin. Format loosely follows
 convention). Versions `2026.0.x` were the phased internal build-up; **`2026.1.0`** is the
 first release of the complete, user-visible feature set.
 
+## [2026.1.4] — 2026-08-03
+
+Red-team hardening, wave 2 — the remaining audit findings (#15–#21, plus the
+cheap items from the #22 grab-bag).
+
+### Fixed
+- **Removed appliances no longer leave zombie devices (#15).** DEPAIRED — and
+  an appliance vanishing from a *successful* discovery pass (haId churn) — now
+  detaches the bridge and flags the device ("Not found on account", error
+  state) instead of leaving it attached to a dead object showing "Off"
+  forever. Re-pairing re-attaches and clears the flag automatically.
+- **Persistently failing reads park instead of grinding (#16).** After 8
+  consecutive failed passes (~20 min of backed-off attempts) the re-read queue
+  parks with one warning, instead of retrying every 10 minutes forever
+  (~144 requests/day per stuck appliance). A CONNECTED transition or PAIRED
+  unparks it. The cloud's connection-initialization 409 is now also treated as
+  "not ready yet", not a failure.
+- **Dynamic-state registration can no longer drop real states (#17).** A newly
+  discovered key's value now goes in its own second batch: if registration
+  fails (or Indigo hasn't rebuilt the state list yet), operationState/status
+  and friends still land, and the new key retries next push.
+- **Every accepted write is now watched, not just Start Program (#18).** Set
+  Power State, Set Setting and Select Program get a 60 s ValueWatch: Home
+  Connect can 2xx-accept a PUT and drop it appliance-side with no error — the
+  watch warns with the wanted-vs-reported values if the change never arrives
+  over SSE.
+- **Unknown state no longer refuses controls (#19).** Right after a plugin
+  restart (before the first re-read lands) Remote Control / Remote Start /
+  OperationState are simply unknown; the guard rails refused with a false
+  "enable Remote Control on the appliance". Unknown now passes through — the
+  appliance stays authoritative and a genuine refusal comes back as a 409 with
+  the actionable hint. Only values the appliance actually *reported* as
+  off/false refuse locally.
+- **SSE events are routed on the worker thread (#20).** Dispatch previously ran
+  observer callbacks — ending in Indigo state writes, an IPC round-trip — on
+  the reader thread; a slow Indigo server could stall reads past the 120 s
+  dead-stream timeout and trigger a spurious reconnect + re-read burst. The
+  reader now only parses and enqueues; the single worker preserves ordering.
+- **Zombie streams are detected and renewed (#21).** The BSH-confirmed backend
+  failure where keep-alives continue but events stop is invisible to the 120 s
+  watchdog. When the stream has carried only keep-alives for 30 minutes *while
+  a program is running* (a running appliance emits progress every few
+  minutes), the stream is renewed — one counted request, and the post-renewal
+  re-read is outside the freshness window by construction.
+- **From the #22 grab-bag:** a bare SSE field name with no colon (valid per
+  spec) no longer restarts the stream; EVENT items without a timestamp always
+  fire (the `(key, None)` dedupe collision silently swallowed repeats); a
+  token-file entry missing `expires_at` refreshes instead of KeyError-looping;
+  the config dialog's auth-status read logs failures at debug instead of
+  swallowing them.
+
 ## [2026.1.3] — 2026-08-03
 
 Red-team hardening, wave 1 — fixes for the highest-severity findings of the
