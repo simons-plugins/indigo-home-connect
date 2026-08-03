@@ -3,9 +3,11 @@
 This is the Phase 4 "don't make the request" firewall. Every control call
 (start / stop / pause / resume / select program, set power, set setting, send
 command) is pre-flight-checked *locally* against the appliance state cache
-before any HTTP is issued, so a request that BSH would reject never leaves the
-plugin — dodging the 10-successive-errors block and the account lock it can
-escalate to. Local refusals raise :class:`ControlRefused` with a
+before any HTTP is issued, so a request the cache can PROVE BSH would reject
+never leaves the plugin — dodging the 10-successive-errors block and the
+account lock it can escalate to. Unknown (never-reported) state deliberately
+passes through: the appliance stays authoritative and a genuine refusal comes
+back as a 409 with an actionable hint. Local refusals raise :class:`ControlRefused` with a
 user-actionable ``reason`` string; the plugin logs it as an error the user can
 act on ("Remote Start not allowed — enable it on the appliance").
 
@@ -23,9 +25,9 @@ menu costs at most one live request per appliance the first time a menu is
 opened; every later menu build that day is served from the cache.
 
 Never imports ``indigo``; all Indigo-touching code lives in ``plugin.py``. HTTP
-goes through an injected :class:`~hc_api.HomeConnectAPI`; the delayed start-watch
-uses an injected ``schedule(fn, delay)`` and a monotonic clock so tests drive it
-deterministically.
+goes through an injected :class:`~hc_api.HomeConnectAPI`; the delayed start and
+value watches use an injected ``schedule(fn, delay)`` and a monotonic clock so
+tests drive them deterministically.
 """
 import logging
 import threading
@@ -227,8 +229,9 @@ class ValueWatch:
             current = self._appliance.get(self._key)
             if not self._matches(current, self._expected):
                 self._logger.warning(
-                    "Home Connect %s: %s was accepted but has not taken effect after %ds "
-                    "(wanted %s, appliance reports %s) — check the appliance",
+                    "Home Connect %s: %s was accepted but has not been reflected after %ds "
+                    "(wanted %s, appliance reports %s) — it may still apply (cloud updates "
+                    "can lag several minutes); if not, check the appliance",
                     self._appliance.name, self._describe, int(self._delay),
                     hc.enum_tail(self._expected) or self._expected,
                     hc.enum_tail(current) or current or "nothing")
@@ -347,7 +350,7 @@ class Controller:
         "enable Remote Control on the appliance" for a setting that was fine
         (#19). The request goes through and a genuine refusal comes back as a
         409 with the actionable hint. Only a value the appliance actually
-        REPORTED as off/false refuses locally."""
+        REPORTED can refuse locally — unknown never does."""
         cls._require_connected(appliance)
         if hc.to_bool(appliance.get(LOCAL_CONTROL)):
             raise ControlRefused(f"{appliance.name} is being controlled at the appliance")

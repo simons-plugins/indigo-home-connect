@@ -206,8 +206,14 @@ class Plugin(indigo.PluginBase):
                 self._api.abort()         # unblock threads stuck at the old client's gate
             # Tear down any running stream; it is bound to the old api/host. The
             # supervisor (or startup) restarts it against the rebuilt client.
+            had_coordinator = self._coordinator is not None
             self._stop_coordinator()
             self._api, self._auth = self._build_client(client_id, client_secret, simulator)
+            # Credentials changed while devices were live: the new client is
+            # unauthorized, so nothing streams until the user authorizes —
+            # surface that instead of freezing devices at healthy-looking state.
+            if had_coordinator and not self._auth.is_authorized():
+                self._mark_devices_auth_required()
 
     # -- Config UI -----------------------------------------------------------
     def getPrefsUiValues(self, *args, **kwargs):  # pylint: disable=unused-argument
@@ -353,8 +359,10 @@ class Plugin(indigo.PluginBase):
     def _appliance_removed(self, haid):
         """DEPAIRED, or vanished from a successful discovery pass: detach the
         bridge and flag the device, instead of leaving it attached to a dead
-        appliance object showing 'Off' forever. If the appliance re-pairs
-        (same or new haId), discovery re-attaches and clears the flag."""
+        appliance object showing 'Off' forever. A re-pair under the SAME haId
+        re-attaches via discovery and clears the flag; a re-pair under a new
+        haId needs the user to re-select the appliance in the device settings
+        (the flag's log line says so)."""
         with self._dev_lock:
             bridges = [b for b in self._bridges.values() if b.haid == haid]
         for bridge in bridges:

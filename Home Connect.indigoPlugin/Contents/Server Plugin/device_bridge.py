@@ -166,12 +166,16 @@ class ApplianceBridge:
         """Flag a device whose haId was absent from a full discovery cycle.
 
         Sets an error state + status so the user sees the appliance is not on the
-        account, once (idempotent). If it later appears, ``attach`` clears this."""
+        account, once (idempotent). If it later appears under the same haId,
+        ``attach`` clears this; a re-pair under a NEW haId needs the device
+        reconfigured. The flag is only latched after the writes succeed, so an
+        Indigo IPC hiccup here retries on the next discovery pass instead of
+        silently never flagging."""
         with self._lock:
             if self._orphaned or self._active:
                 return
-            self._orphaned = True
-        self._logger.warning("Home Connect %s: appliance not found on the account", self._ctx())
+        self._logger.warning("Home Connect %s: appliance not found on the account — if it was "
+                             "re-paired, re-select it in the device settings", self._ctx())
         try:
             self.device.updateStatesOnServer([
                 {"key": "connected", "value": False, "uiValue": "No"},
@@ -180,6 +184,10 @@ class ApplianceBridge:
             self.device.setErrorStateOnServer("appliance not found on Home Connect account")
         except Exception:  # pylint: disable=broad-except
             self._logger.exception("Home Connect %s: orphan-state write failed", self._ctx())
+            return
+        with self._lock:
+            if not self._active:              # a concurrent attach wins
+                self._orphaned = True
 
     def mark_auth_required(self):
         """Surface lost authorization on the device.
@@ -216,13 +224,15 @@ class ApplianceBridge:
 
     # -- State push ----------------------------------------------------------
     def push(self):
-        """Recompute and batch-write every state from the appliance snapshot.
+        """Recompute and write the states from the appliance snapshot.
 
-        The lock spans snapshot → dynamic registration → write → policy so
+        Two batches: known states first, then values for keys registered this
+        push (withheld when their registration failed — they retry next push).
+        The lock spans snapshot → dynamic registration → writes → policy so
         concurrent pushes serialise (no stale batch lands last) and a detach
-        cannot interleave with the write (docstring guarantee). After the write
-        the ``_active`` re-check drops the trailing policy write if the write
-        itself detached the bridge."""
+        cannot interleave with the writes (docstring guarantee). After the
+        writes the ``_active`` re-check drops the trailing policy write if the
+        write itself detached the bridge."""
         with self._lock:
             appliance = self._appliance
             if appliance is None:

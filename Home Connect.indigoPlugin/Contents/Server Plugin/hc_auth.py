@@ -422,8 +422,9 @@ class HomeConnectAuth:
         repeated generic failures. Defers (returns False) while the shared
         request gate is closed: a token POST would otherwise block the caller —
         the plugin's supervisor thread — for the whole Retry-After. Concurrent
-        callers collapse to one HTTP refresh. Returns True if the current token
-        is fresh afterwards."""
+        callers collapse to one HTTP refresh. Returns True when a refresh was
+        performed (here, or by a concurrent caller moments ago); False when no
+        refresh was needed, possible or allowed yet."""
         entry = self._store.get(self._client_id)
         if not entry:
             return False
