@@ -284,3 +284,154 @@ def test_aborted_read_error_drops_quietly_without_retry():
     sched.run_all()
     assert len(sched.jobs) == 0                  # no retry scheduled
     assert not logger.warning.called             # debug only, no false "retrying"
+
+
+# -- Red-team wave 2 (#16 parking, L4 dedupe) ---------------------------------
+
+def test_persistent_read_failures_park_until_fresh_signal(monkeypatch):
+    import hc_appliance as mod
+    monkeypatch.setattr(mod, "READ_GIVE_UP_AFTER", 2)
+    clock = Clock()
+    reader = FakeReader()
+    reader.queue("appliance", HomeConnectError("init failed", status=409),
+                 HomeConnectError("init failed", status=409))
+    sched = RecordingScheduler()
+    logger = Mock()
+    appliance = HomeConnectAppliance("H", {"connected": True}, reader, sched.post,
+                                     logger=logger, monotonic=clock.monotonic)
+    appliance.on_paired()
+    sched.run_next()                             # fail #1 -> retry queued
+    sched.run_next()                             # fail #2 -> parked, reprobe queued
+    assert any("pausing them" in str(c) for c in logger.warning.call_args_list)
+    assert sched.history[-1] == mod.READ_PARKED_RETRY   # slow self-heal queued
+    calls_when_parked = len(reader.calls)
+
+    appliance.on_stream_start()                  # routine reconnect: stays parked
+    assert len(sched.jobs) == 1                  # only the reprobe pending
+    assert len(reader.calls) == calls_when_parked
+
+    appliance.on_paired()                        # PAIRED (forced): unparks
+    sched.run_all()                              # reprobe no-ops (not parked), read runs
+    assert len(reader.calls) > calls_when_parked
+
+
+def test_connected_transition_unparks_reads(monkeypatch):
+    import hc_appliance as mod
+    monkeypatch.setattr(mod, "READ_GIVE_UP_AFTER", 1)
+    clock = Clock()
+    reader = FakeReader()
+    reader.queue("appliance", HomeConnectError("boom", status=500))
+    sched = RecordingScheduler()
+    appliance = HomeConnectAppliance("H", {"connected": True}, reader, sched.post,
+                                     logger=Mock(), monotonic=clock.monotonic)
+    appliance.on_paired()
+    sched.run_next()                             # one failure -> parked
+    parked_calls = len(reader.calls)
+
+    appliance.on_disconnected()
+    appliance.on_connected()                     # a real signal from the appliance
+    sched.run_all()                              # reprobe no-ops, read runs
+    assert len(reader.calls) > parked_calls
+
+
+def test_parked_reprobe_forces_read_when_still_parked(monkeypatch):
+    # A never-flapping appliance with a transiently broken endpoint must
+    # self-heal via the slow reprobe, not stay parked forever.
+    import hc_appliance as mod
+    monkeypatch.setattr(mod, "READ_GIVE_UP_AFTER", 1)
+    clock = Clock()
+    reader = FakeReader()
+    reader.queue("appliance", HomeConnectError("boom", status=500))
+    sched = RecordingScheduler()
+    appliance = HomeConnectAppliance("H", {"connected": True}, reader, sched.post,
+                                     logger=Mock(), monotonic=clock.monotonic)
+    appliance.on_paired()
+    sched.run_next()                             # fail -> parked, reprobe queued
+    assert len(reader.calls) == 1
+    sched.run_all()                              # reprobe fires: forced full pass
+    assert len(reader.calls) == 1 + 5
+
+
+def test_event_without_timestamp_always_fires():
+    # (key, None) collided in the dedupe set: the second real occurrence was
+    # silently swallowed until 512 other events evicted it.
+    appliance, _, _ = make_appliance()
+    fired = []
+    appliance.subscribe("BSH.Common.Event.ProgramFinished", lambda k, v: fired.append(v))
+    item = {"key": "BSH.Common.Event.ProgramFinished", "value": "Present"}   # no timestamp
+    appliance.handle_event_items([item])
+    appliance.handle_event_items([dict(item)])
+    assert fired == ["Present", "Present"]
+
+
+def test_successful_pass_resets_failure_counter(monkeypatch):
+    # Parking must require CONSECUTIVE failures: 8 lifetime transient failures
+    # spread across successful passes must never park a healthy appliance.
+    import hc_appliance as mod
+    monkeypatch.setattr(mod, "READ_GIVE_UP_AFTER", 3)
+    clock = Clock()
+    reader = FakeReader()
+    sched = RecordingScheduler()
+    logger = Mock()
+    appliance = HomeConnectAppliance("H", {"connected": True}, reader, sched.post,
+                                     logger=logger, monotonic=clock.monotonic)
+
+    reader.queue("appliance", HomeConnectError("blip", status=500),
+                 HomeConnectError("blip", status=500))
+    appliance.on_paired()
+    sched.run_next()                             # fail #1
+    sched.run_next()                             # fail #2 (one short of parking)
+    sched.run_all()                              # succeeds -> counter resets
+
+    clock.t += 400                               # leave the freshness window
+    reader.queue("appliance", HomeConnectError("blip", status=500),
+                 HomeConnectError("blip", status=500))
+    appliance.on_stream_start()
+    sched.run_next()                             # fail #1 of a NEW sequence
+    sched.run_next()                             # fail #2 — still not parked
+    assert not appliance._read_parked
+    assert not any("pausing them" in str(c) for c in logger.warning.call_args_list)
+
+
+def test_unpark_resets_retry_delay(monkeypatch):
+    # The first post-unpark failure must back off from READ_MIN_DELAY, not
+    # resume at the accumulated pre-park delay.
+    import hc_appliance as mod
+    monkeypatch.setattr(mod, "READ_GIVE_UP_AFTER", 3)
+    clock = Clock()
+    reader = FakeReader()
+    reader.queue("appliance", *[HomeConnectError("boom", status=500)] * 4)
+    sched = RecordingScheduler()
+    appliance = HomeConnectAppliance("H", {"connected": True}, reader, sched.post,
+                                     logger=Mock(), monotonic=clock.monotonic)
+    appliance.on_paired()
+    sched.run_next()                             # fail #1 -> retry at 5s
+    sched.run_next()                             # fail #2 -> retry at 10s
+    sched.run_next()                             # fail #3 -> parked
+
+    appliance.on_paired()                        # forced unpark
+    sched.jobs.clear()                           # drop the reprobe for clarity
+    appliance._read_scheduled = False
+    appliance._read_actions = None
+    appliance._schedule_read(force=True)
+    sched.run_next()                             # fail again post-unpark
+    assert sched.history[-1] == READ_MIN_DELAY   # clean backoff, not 20s
+
+
+def test_reread_deferred_while_gate_closed():
+    # The worker also routes every live SSE event: a gate-blocked GET here
+    # would freeze device updates for the whole Retry-After. Defer instead.
+    clock = Clock()
+    reader = FakeReader()
+    reader.gate_wait = 300.0
+    sched = RecordingScheduler()
+    appliance = HomeConnectAppliance("H", {"connected": True}, reader, sched.post,
+                                     logger=Mock(), monotonic=clock.monotonic)
+    appliance.on_paired()
+    sched.run_next()
+    assert reader.calls == []                    # no HTTP attempted
+    assert sched.history[-1] == 301.0            # rescheduled past the gate
+
+    reader.gate_wait = 0.0
+    sched.run_next()                             # gate open: the pass runs
+    assert len(reader.calls) == 5

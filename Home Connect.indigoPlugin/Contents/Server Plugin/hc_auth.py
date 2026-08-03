@@ -168,6 +168,12 @@ class TokenStore:
             return self._last_refresh_ts.get(client_id, float("-inf"))
 
 
+def _expires_at(entry):
+    """The entry's numeric expiry, or 0 (= due immediately) when corrupted."""
+    value = entry.get("expires_at")
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+
 class HomeConnectAuth:
     """Holds one client id's OAuth flows over a shared :class:`TokenStore`."""
 
@@ -404,7 +410,10 @@ class HomeConnectAuth:
         entry = self._store.get(self._client_id)
         if not entry:
             return None
-        return entry["expires_at"] - REFRESH_WINDOW
+        # A hand-edited/truncated entry with a missing or non-numeric
+        # expires_at is due immediately — the refresh rewrites it whole (never
+        # a KeyError/TypeError loop in the supervisor).
+        return _expires_at(entry) - REFRESH_WINDOW
 
     def refresh_if_needed(self, force=False):
         """Refresh the access token if it is within :data:`REFRESH_WINDOW` of
@@ -413,8 +422,9 @@ class HomeConnectAuth:
         repeated generic failures. Defers (returns False) while the shared
         request gate is closed: a token POST would otherwise block the caller —
         the plugin's supervisor thread — for the whole Retry-After. Concurrent
-        callers collapse to one HTTP refresh. Returns True if the current token
-        is fresh afterwards."""
+        callers collapse to one HTTP refresh. Returns True when a refresh was
+        performed (here, or by a concurrent caller moments ago); False when no
+        refresh was needed, possible or allowed yet."""
         entry = self._store.get(self._client_id)
         if not entry:
             return False
@@ -424,7 +434,7 @@ class HomeConnectAuth:
             if self._state == STATE_AUTH_REQUIRED:
                 return False              # dead refresh token: re-auth required, don't resubmit
             now = self._now()
-            due_at = entry["expires_at"] - REFRESH_WINDOW
+            due_at = _expires_at(entry) - REFRESH_WINDOW
             if not force and now < due_at:
                 return False
             if now < self._refresh_backoff_until:

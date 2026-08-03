@@ -394,3 +394,37 @@ def test_mark_auth_required_surfaces_error_state():
     assert dev.states["connected"] is False
     assert dev.states["status"] == "Authorization required"
     assert dev.error_state == "Authorization required"
+
+
+# -- Red-team wave 2 (#17 dynamic-state batch split) --------------------------
+
+def test_new_dynamic_value_pushed_in_separate_batch():
+    bridge, dev = make_bridge()
+    appliance = make_appliance()
+    appliance.merge_items([{"key": "Vendor.Weird.NewKey", "value": "x"},
+                           {"key": OP, "value": "BSH.Common.EnumType.OperationState.Run"}])
+    bridge.attach(appliance)
+    # Two batches: known states first, the just-registered dynamic key second —
+    # a failed registration must never take operationState/status down with it.
+    assert len(dev.batches) == 2
+    first, second = dev.batches
+    assert any(u["key"] == "operationState" for u in first)
+    assert all(u["key"] != "vendorWeirdNewKey" for u in first)     # sanitized ID
+    assert {"key": "vendorWeirdNewKey", "value": "x", "uiValue": "x"} in second
+
+
+def test_failed_dynamic_registration_still_pushes_known_states():
+    bridge, dev = make_bridge()
+    appliance = make_appliance()
+    appliance.merge_items([{"key": "Vendor.Weird.NewKey", "value": "x"},
+                           {"key": OP, "value": "BSH.Common.EnumType.OperationState.Run"}])
+
+    def boom(props):
+        raise RuntimeError("registration failed")
+
+    dev.replacePluginPropsOnServer = boom
+    bridge.attach(appliance)
+    # Exactly one batch (known states); the unregistered key's value withheld.
+    pushed_keys = [u["key"] for batch in dev.batches for u in batch]
+    assert "operationState" in pushed_keys
+    assert "vendorWeirdNewKey" not in pushed_keys                  # sanitized ID

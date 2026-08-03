@@ -171,3 +171,32 @@ def test_auth_loss_marking_waits_for_coordinator_to_actually_stop(monkeypatch):
     coord.stop = lambda timeout=5.0: True     # next tick: stop succeeds
     p._reconcile_coordinator()                # pylint: disable=protected-access
     bridge.mark_auth_required.assert_called_once()
+
+
+def test_changed_credentials_rebuild_marks_devices(monkeypatch):
+    # Swapping Client ID kills the stream until the new client is authorized:
+    # devices must show it, not freeze at healthy-looking state (review 3a).
+    _patch(monkeypatch)
+    p = _plugin()
+
+    class _OldAuth(_FakeAuth):
+        def matches(self, client_id, client_secret, simulator):  # noqa: ARG002
+            return False                          # credentials changed
+
+    class _NewAuth:
+        def is_authorized(self):
+            return False
+
+        def state(self):
+            return "unauthorized"
+
+    p._api = Mock()                               # pylint: disable=protected-access
+    p._auth = _OldAuth()                          # pylint: disable=protected-access
+    p._reconcile_coordinator()                    # pylint: disable=protected-access
+    assert p._coordinator is not None             # pylint: disable=protected-access
+    bridge = Mock()
+    p._bridges[1] = bridge                        # pylint: disable=protected-access
+
+    monkeypatch.setattr(p, "_build_client", lambda cid, sec, sim: (Mock(), _NewAuth()))
+    p._rebuild_client()                           # pylint: disable=protected-access
+    bridge.mark_auth_required.assert_called_once()

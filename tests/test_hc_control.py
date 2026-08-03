@@ -194,8 +194,6 @@ def test_rate_limiter_thread_safe_exactly_limit_succeed():
     {"remote_start": False},
     {"local_control": True},
     {"op": "Run"},                      # not Ready
-    {"op": None},                       # unknown -> refuse
-    {"remote_control": None},           # unknown -> refuse (strict pre-flight)
 ])
 def test_start_refused_locally_makes_no_http(kwargs, tmp_path):
     transport = ScriptedTransport()
@@ -204,6 +202,23 @@ def test_start_refused_locally_makes_no_http(kwargs, tmp_path):
     with pytest.raises(ControlRefused):
         controller.start_program(appliance, "BSH.Common.Program.Auto")
     assert transport.requests == []     # firewall: nothing was sent
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"op": None},                       # never reported (e.g. just after restart)
+    {"remote_control": None},
+    {"remote_start": None},
+])
+def test_start_with_unknown_state_sends_request(kwargs, tmp_path):
+    # UNKNOWN must not refuse (#19): refusing on None told the user to enable a
+    # Remote Control setting that was fine. The request goes out; a genuine
+    # refusal comes back as a 409 mapped to the actionable hint.
+    transport = ScriptedTransport()
+    transport.queue(204, HC_JSON, b"")
+    controller = make_controller(transport, tmp_path)
+    appliance = make_appliance(**kwargs)
+    controller.start_program(appliance, "BSH.Common.Program.Auto")
+    assert len(puts(transport)) == 1    # sent, appliance stays authoritative
 
 
 def test_start_success_payload_and_no_retry(tmp_path):
@@ -662,3 +677,57 @@ def test_gated_capability_load_with_no_cache_raises_without_http(tmp_path):
         controller.all_programs(make_appliance())
     assert exc.value.status == 429
     assert transport.requests == []
+
+
+# -- Red-team wave 2: ValueWatch (#18) + unknown-state pass-through (#19) -----
+
+def test_value_watch_converged_value_no_warning():
+    appliance = make_appliance()
+    logger = Mock()
+    scheduled = []
+    hc_control.ValueWatch(appliance, "BSH.Common.Setting.PowerState",
+                          "BSH.Common.EnumType.PowerState.Off",
+                          lambda fn, delay: scheduled.append(fn), logger)
+    appliance.merge_items([{"key": "BSH.Common.Setting.PowerState",
+                            "value": "BSH.Common.EnumType.PowerState.Off"}])
+    scheduled[0]()                               # timeout fires after convergence
+    assert not logger.warning.called
+
+
+def test_value_watch_warns_when_value_never_lands():
+    appliance = make_appliance(power="On")
+    logger = Mock()
+    scheduled = []
+    hc_control.ValueWatch(appliance, "BSH.Common.Setting.PowerState",
+                          "BSH.Common.EnumType.PowerState.Off",
+                          lambda fn, delay: scheduled.append(fn), logger,
+                          describe="power state")
+    scheduled[0]()                               # nothing arrived over SSE
+    message = " ".join(str(c) for c in logger.warning.call_args_list)
+    assert "accepted but has not been reflected" in message
+    assert "may still apply" in message          # uncertainty, not failure (cloud lag)
+    assert "power state" in message
+
+
+def test_value_watch_unsubscribes_after_timeout():
+    appliance = make_appliance()
+    scheduled = []
+    watch = hc_control.ValueWatch(appliance, "SomeKey", "v",
+                                  lambda fn, delay: scheduled.append(fn), Mock())
+    scheduled[0]()
+    # A later change must not resurrect the watch (observer removed).
+    appliance.merge_items([{"key": "SomeKey", "value": "v"}])
+    assert watch._done
+
+
+@pytest.mark.parametrize("current,expected,should_match", [
+    ("BSH.Common.EnumType.PowerState.Off", "BSH.Common.EnumType.PowerState.Off", True),
+    (True, True, True),
+    (1, True, True),                    # Python equality: SSE 1 vs coerced True
+    (45, 45.0, True),                   # float echo of an int setting
+    ("5.5", 5.5, True),                 # str fallback catches numeric echo
+    ("BSH.Common.EnumType.PowerState.On", "BSH.Common.EnumType.PowerState.Off", False),
+    (None, "x", False),
+])
+def test_value_watch_matches_representations(current, expected, should_match):
+    assert hc_control.ValueWatch._matches(current, expected) is should_match

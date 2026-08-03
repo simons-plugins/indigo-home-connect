@@ -407,3 +407,39 @@ def test_validate_set_setting_requires_key(tmp_path):
         {"settingKey": "  "}, "setSetting", 5)
     assert ok is False
     assert "settingKey" in errors
+
+
+# -- Red-team wave 2 review round: ValueWatch wiring (#18) --------------------
+
+def test_set_power_state_arms_value_watch(tmp_path):
+    transport = ScriptedTransport()
+    transport.queue(200, HC_JSON, json.dumps({"data": {"constraints": {
+        "allowedvalues": ["BSH.Common.EnumType.PowerState.On"]}}}))
+    transport.queue(204, HC_JSON, b"")
+    p = _plugin(transport, tmp_path)
+    p._coordinator = _FakeCoord([_appliance()])
+    p.setPowerState(_Action({"powerState": "BSH.Common.EnumType.PowerState.On"}), _device())
+    assert p.logger.error.call_count == 0
+    assert p._schedule_later.call_count == 1     # watch armed after the accepted write
+
+
+def test_set_setting_arms_value_watch(tmp_path):
+    transport = ScriptedTransport()
+    transport.queue(204, HC_JSON, b"")
+    p = _plugin(transport, tmp_path)
+    p._coordinator = _FakeCoord([_appliance()])
+    p.setSetting(_Action({"settingKey": "BSH.Common.Setting.ChildLock",
+                          "settingValue": "true"}), _device())
+    assert p.logger.error.call_count == 0
+    assert p._schedule_later.call_count == 1
+
+
+def test_select_program_arms_value_watch(tmp_path):
+    transport = ScriptedTransport()
+    transport.queue(204, HC_JSON, b"")
+    p = _plugin(transport, tmp_path)
+    p._coordinator = _FakeCoord([_appliance()])
+    p.selectProgram(_Action({"program": "Dishcare.Dishwasher.Program.Eco50",
+                             "powerOnFirst": False}), _device())
+    assert p.logger.error.call_count == 0
+    assert p._schedule_later.call_count == 1

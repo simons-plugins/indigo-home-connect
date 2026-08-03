@@ -11,9 +11,12 @@ Design mirrors homebridge-homeconnect's ``HomeConnectDevice`` (ideas, not code):
 * STATUS / NOTIFY items and re-read results merge into the cache.
 * EVENT items are discrete occurrences and are de-duplicated by
   ``(haId, key, timestamp)`` so a dishwasher re-sending ``ProgramFinished`` on
-  reconnect never double-fires downstream (PRD §3.7).
+  reconnect never double-fires downstream (PRD §3.7); items without a
+  timestamp always fire (nothing to dedupe on).
 * Synthetic START/STOP (from the SSE reader) drive reconnect re-reads and, when
-  the stream stays down, mark the appliance disconnected.
+  the stream stays down, mark the appliance disconnected. Re-reads are skipped
+  inside a 5-min freshness window, and park after repeated failures — budget
+  protection for flapping and for broken-but-listed-connected appliances.
 
 Threading: mutation of the cache/queue is guarded by a lock. Actual network
 reads run on the coordinator's single worker thread via an injected
@@ -25,7 +28,7 @@ import logging
 import threading
 import time
 
-from hc_api import HomeConnectError
+from hc_api import HomeConnectError, redact
 
 # Synthetic key for the appliance's reachability (not a BSH key).
 CONNECTED = "connected"
@@ -53,6 +56,17 @@ READ_FACTOR = 2.0
 # an unsuppressed re-read per flap can exhaust the daily budget with zero user
 # activity. PAIRED / first discovery force a read regardless.
 READ_FRESH_WINDOW = 5 * 60.0
+
+# After this many consecutive failed read attempts the queue parks (~10 min of
+# backed-off retries: 5+10+20+40+80+160+320 s): an appliance the cloud lists as
+# connected but whose endpoints persistently error would otherwise grind
+# ~144 requests/day forever. A CONNECTED *transition*, PAIRED, a forced read or
+# the slow reprobe below unparks it.
+READ_GIVE_UP_AFTER = 8
+
+# While parked, reprobe this often (~2-4 requests/day) so a transient
+# cloud-side endpoint outage self-heals without a flap or plugin restart.
+READ_PARKED_RETRY = 6 * 3600.0
 
 # Bound on remembered EVENT dedupe keys (guards unbounded growth).
 MAX_SEEN_EVENTS = 512
@@ -88,6 +102,8 @@ class HomeConnectAppliance:
         self._read_delay = 0.0
         self._read_scheduled = False
         self._last_read_complete = None       # monotonic time of last full pass
+        self._read_failures = 0               # consecutive failed passes
+        self._read_parked = False             # gave up until a fresh signal
 
         # Generation counter cancels a superseded pending-disconnect job.
         self._disconnect_gen = 0
@@ -101,7 +117,9 @@ class HomeConnectAppliance:
 
     @property
     def name(self):
-        return self._info.get("name") or self._info.get("type") or self.haid
+        # Redacted haId fallback: `name` lands in log lines, and a nameless
+        # appliance must not leak its raw haId there (first-4/last-8 contract).
+        return self._info.get("name") or self._info.get("type") or redact(self.haid)
 
     @property
     def connected(self):
@@ -175,8 +193,11 @@ class HomeConnectAppliance:
     def handle_event_items(self, items):
         """Merge discrete EVENT items, de-duplicating by ``(key, timestamp)``.
 
-        Returns the list of ``(key, value)`` pairs that were fresh (not a repeat)
-        so callers can decide whether a downstream trigger should fire.
+        Items without a timestamp are always treated as fresh — there is
+        nothing to dedupe on, and colliding them at ``(key, None)`` silently
+        swallowed real repeats. Returns the list of ``(key, value)`` pairs that
+        were fresh (not a repeat) so callers can decide whether a downstream
+        trigger should fire.
         """
         fresh = []
         with self._lock:
@@ -184,7 +205,16 @@ class HomeConnectAppliance:
                 key = item.get("key")
                 if key is None:
                     continue
-                dedupe_key = (key, item.get("timestamp"))
+                timestamp = item.get("timestamp")
+                if timestamp is None:
+                    # No timestamp -> nothing to dedupe on. Treat as fresh:
+                    # colliding every occurrence at (key, None) silently
+                    # swallowed real repeats for weeks on quiet appliances.
+                    value = item.get("value")
+                    self._state[key] = value
+                    fresh.append((key, value))
+                    continue
+                dedupe_key = (key, timestamp)
                 if dedupe_key in self._seen_events:
                     continue
                 self._seen_events.add(dedupe_key)
@@ -202,7 +232,7 @@ class HomeConnectAppliance:
     def on_stream_start(self):
         """Synthetic START: cancel any pending disconnect and re-read state
         (the read is skipped when the last full pass is within the 5-min
-        freshness window)."""
+        freshness window, or while the queue is parked)."""
         with self._lock:
             self._disconnect_gen += 1         # supersede a scheduled disconnect
         self._schedule_read()
@@ -225,7 +255,8 @@ class HomeConnectAppliance:
     def on_connected(self):
         """CONNECTED wire event: mark reachable and re-read state (the read is
         skipped when the last full pass is within the freshness window — a
-        flapping appliance must not cost a 5-GET pass per flap)."""
+        flapping appliance must not cost a 5-GET pass per flap). A reachability
+        TRANSITION also unparks a parked queue."""
         self._set_connected(True)
 
     def on_disconnected(self):
@@ -244,6 +275,12 @@ class HomeConnectAppliance:
             changed = previous != value
             if not value:
                 self._read_actions = None     # abandon any pending reads
+            elif changed:
+                # A fresh CONNECTED is a real signal from the appliance: a
+                # parked read queue gets another chance, from a clean backoff.
+                self._read_parked = False
+                self._read_failures = 0
+                self._read_delay = 0.0
         if value:
             self._schedule_read()
         if changed:
@@ -252,6 +289,12 @@ class HomeConnectAppliance:
     # -- Re-read queue (runs on the worker thread) --------------------------
     def _schedule_read(self, force=False):
         with self._lock:
+            if self._read_parked:
+                if not force:
+                    return
+                self._read_parked = False
+                self._read_failures = 0
+                self._read_delay = 0.0
             if not force and self._last_read_complete is not None:
                 age = self._monotonic() - self._last_read_complete
                 if age < READ_FRESH_WINDOW:
@@ -270,12 +313,26 @@ class HomeConnectAppliance:
         self._schedule(self._run_read, 0)
 
     def _run_read(self):
+        # Never block the shared worker at the rate-limit gate: this thread
+        # also routes every live SSE event, and a gate-blocked GET here would
+        # freeze device updates for the whole Retry-After. Defer instead.
+        wait = self._reader.gate_wait_remaining()
+        if wait > 0:
+            with self._lock:
+                if self._read_actions is None:
+                    self._read_scheduled = False
+                    return                    # abandoned while queued
+            self._logger.debug("Home Connect %s: re-read deferred %.0fs (rate-limit gate)",
+                               self.name, wait)
+            self._schedule(self._run_read, min(wait + 1.0, READ_MAX_DELAY))
+            return
         while True:
             with self._lock:
                 if not self._read_actions:    # finished ([]) or abandoned (None)
                     finished = self._read_actions is not None
                     if finished:
                         self._last_read_complete = self._monotonic()
+                        self._read_failures = 0
                     self._read_actions = None
                     self._read_scheduled = False
                     connected = self._state.get(CONNECTED)
@@ -312,11 +369,31 @@ class HomeConnectAppliance:
                 self._logger.debug("Home Connect %s: dropping '%s' read (disconnected)",
                                    self.name, action)
                 return
+            self._read_failures += 1
+            if self._read_failures >= READ_GIVE_UP_AFTER:
+                self._read_parked = True
+                self._read_actions = None
+                self._read_scheduled = False
+                self._logger.warning(
+                    "Home Connect %s: state reads keep failing (%d attempts, last: %s) — "
+                    "pausing them for %.0fh (live events still update the device); a "
+                    "reconnect or plugin restart resumes them sooner", self.name,
+                    self._read_failures, exc, READ_PARKED_RETRY / 3600)
+                self._schedule(self._parked_probe, READ_PARKED_RETRY)
+                return
             self._read_delay = min(self._read_delay * READ_FACTOR or READ_MIN_DELAY, READ_MAX_DELAY)
             delay = self._read_delay
         self._logger.warning("Home Connect %s: '%s' read failed (%s); retrying in %.0fs",
                              self.name, action, exc, delay)
         self._schedule(self._run_read, delay)
+
+    def _parked_probe(self):
+        """Slow self-heal for a parked queue: one forced pass per interval."""
+        with self._lock:
+            if not self._read_parked or not self._state.get(CONNECTED):
+                return
+        self._logger.debug("Home Connect %s: parked-read reprobe", self.name)
+        self._schedule_read(force=True)
 
     def _do_read_action(self, action):
         if action == "appliance":

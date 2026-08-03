@@ -166,12 +166,16 @@ class ApplianceBridge:
         """Flag a device whose haId was absent from a full discovery cycle.
 
         Sets an error state + status so the user sees the appliance is not on the
-        account, once (idempotent). If it later appears, ``attach`` clears this."""
+        account, once (idempotent). If it later appears under the same haId,
+        ``attach`` clears this; a re-pair under a NEW haId needs the device
+        reconfigured. The flag is only latched after the writes succeed, so an
+        Indigo IPC hiccup here retries on the next discovery pass instead of
+        silently never flagging."""
         with self._lock:
             if self._orphaned or self._active:
                 return
-            self._orphaned = True
-        self._logger.warning("Home Connect %s: appliance not found on the account", self._ctx())
+        self._logger.warning("Home Connect %s: appliance not found on the account — if it was "
+                             "re-paired, re-select it in the device settings", self._ctx())
         try:
             self.device.updateStatesOnServer([
                 {"key": "connected", "value": False, "uiValue": "No"},
@@ -180,6 +184,10 @@ class ApplianceBridge:
             self.device.setErrorStateOnServer("appliance not found on Home Connect account")
         except Exception:  # pylint: disable=broad-except
             self._logger.exception("Home Connect %s: orphan-state write failed", self._ctx())
+            return
+        with self._lock:
+            if not self._active:              # a concurrent attach wins
+                self._orphaned = True
 
     def mark_auth_required(self):
         """Surface lost authorization on the device.
@@ -216,25 +224,37 @@ class ApplianceBridge:
 
     # -- State push ----------------------------------------------------------
     def push(self):
-        """Recompute and batch-write every state from the appliance snapshot.
+        """Recompute and write the states from the appliance snapshot.
 
-        The lock spans snapshot → dynamic registration → write → policy so
+        Two batches: known states first, then values for keys registered this
+        push (withheld when their registration failed — they retry next push).
+        The lock spans snapshot → dynamic registration → writes → policy so
         concurrent pushes serialise (no stale batch lands last) and a detach
-        cannot interleave with the write (docstring guarantee). After the write
-        the ``_active`` re-check drops the trailing policy write if the write
-        itself detached the bridge."""
+        cannot interleave with the writes (docstring guarantee). After the
+        writes the ``_active`` re-check drops the trailing policy write if the
+        write itself detached the bridge."""
         with self._lock:
             appliance = self._appliance
             if appliance is None:
                 return
             snapshot = appliance.state_snapshot()
-            updates, new_dynamic = self._build_updates(snapshot)
+            updates, new_dynamic_updates, new_dynamic = self._build_updates(snapshot)
+            registered = True
             if new_dynamic:
-                self._register_dynamic(new_dynamic)
+                registered = self._register_dynamic(new_dynamic)
+            # Known states first, in their own batch: a failed registration (or
+            # an Indigo that hasn't rebuilt the state list yet) must never take
+            # operationState/status down with it (#17).
             try:
                 self.device.updateStatesOnServer(updates)
             except Exception:  # pylint: disable=broad-except
                 self._logger.exception("Home Connect %s: state push failed", self._ctx())
+            if registered and new_dynamic_updates:
+                try:
+                    self.device.updateStatesOnServer(new_dynamic_updates)
+                except Exception:  # pylint: disable=broad-except
+                    self._logger.exception("Home Connect %s: dynamic-state push failed "
+                                           "(retried on next update)", self._ctx())
             if not self._active:
                 return                        # the write detached us; skip policy
             self._apply_connection_policy(snapshot)
@@ -245,6 +265,7 @@ class ApplianceBridge:
 
     def _build_updates(self, snapshot):
         updates = []
+        new_dynamic_updates = []              # values for keys registered THIS push
         new_dynamic = []
         for bsh_key, value in snapshot.items():
             spec = hc.spec_for(self.device_type_id, bsh_key)
@@ -258,9 +279,12 @@ class ApplianceBridge:
                     continue
                 if sid in self._base_ids:
                     continue
+                entry = {"key": sid, "value": _stringify(value), "uiValue": _stringify(value)}
                 if sid not in self._dynamic_ids:
                     new_dynamic.append(sid)
-                updates.append({"key": sid, "value": _stringify(value), "uiValue": _stringify(value)})
+                    new_dynamic_updates.append(entry)
+                else:
+                    updates.append(entry)
 
         # Derived: formatted remaining time, last event, and the summary. Keyed on
         # presence (not truthiness) so a null RemainingProgramTime at program end
@@ -276,7 +300,7 @@ class ApplianceBridge:
         updates.append({"key": "lastEventTime", "value": last_event_time, "uiValue": last_event_time})
         summary = summarize_status(snapshot, self._treat_disconnected_as_off, self._last_event)
         updates.append({"key": "status", "value": summary, "uiValue": summary})
-        return updates, new_dynamic
+        return updates, new_dynamic_updates, new_dynamic
 
     # Safe cleared value per kind when Home Connect sends null to remove a key
     # (e.g. RemainingProgramTime / ActiveProgram vanish at program end). Real
@@ -312,12 +336,15 @@ class ApplianceBridge:
         the registration instead of forever emitting an unregistered key. A
         rollback write that itself fails is logged at warning (not swallowed):
         rolled-back and rollback-failed are different states.
+
+        Returns True when the registration landed (the caller may then write the
+        new keys' values); False when it failed and was rolled back.
         """
         with self._lock:
             previous = set(self._dynamic_ids)
             merged = sorted(self._dynamic_ids | set(new_ids))
             if merged == sorted(previous):
-                return
+                return True
             self._dynamic_ids = set(merged)
         props = dict(self.device.pluginProps)
         before = props.get(_DYNAMIC_PROP, "")
@@ -325,6 +352,7 @@ class ApplianceBridge:
         try:
             self.device.replacePluginPropsOnServer(props)
             self.device.stateListOrDisplayStateIdChanged()
+            return True
         except Exception:  # pylint: disable=broad-except
             # Restore in-memory state too, or registration never retries.
             with self._lock:
@@ -338,6 +366,7 @@ class ApplianceBridge:
             except Exception:  # pylint: disable=broad-except
                 self._logger.warning("Home Connect %s: rollback of dynamic-state props "
                                      "also failed", self._ctx())
+            return False
 
     def _apply_connection_policy(self, snapshot):
         connected = snapshot.get(CONNECTED)

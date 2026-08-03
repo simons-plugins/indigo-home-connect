@@ -14,7 +14,7 @@ import hc_events
 from hc_api import HomeConnectAPI, HomeConnectError
 from hc_events import (ApiReader, EventStream, HomeConnectCoordinator, Scheduler,
                        SseEvent, SseParseError, build_event, parse_sse_lines,
-                       START, STOP, STATUS)
+                       START, STOP, STATUS, DEPAIRED)
 from support import Clock, FakeAPI, ScriptedTransport
 
 HC_JSON = {"content-type": "application/vnd.bsh.sdk.v1+json"}
@@ -418,12 +418,15 @@ def test_coordinator_discovers_appliances_once():
 
 
 def test_coordinator_routes_status_to_appliance():
+    # _dispatch hands off to the worker scheduler (#20 — the reader thread must
+    # never do Indigo IPC); run_pending drives the worker synchronously.
     coord, _ = make_coordinator(
         [{"haId": "HAID-1", "name": "D", "type": "Dishwasher", "connected": True}])
     coord._discover()                        # pylint: disable=protected-access
     coord._dispatch(SseEvent(STATUS, haid="HAID-1",                # pylint: disable=protected-access
                              data={"items": [{"key": "BSH.Common.Status.DoorState",
                                               "value": "Open"}]}))
+    coord._scheduler.run_pending()           # pylint: disable=protected-access
     appliance = coord.appliances()[0]
     assert appliance.get("BSH.Common.Status.DoorState") == "Open"
 
@@ -436,15 +439,25 @@ def test_coordinator_start_stop_broadcast_to_appliances():
     coord._on_event = lambda e: tap.append(e.event)   # pylint: disable=protected-access
     coord._dispatch(SseEvent(START))         # pylint: disable=protected-access
     coord._dispatch(SseEvent(STOP, error=None))       # pylint: disable=protected-access
-    assert tap == [START, STOP]
+    coord._scheduler.run_pending()           # pylint: disable=protected-access
+    assert tap == [START, STOP]              # single worker preserves ordering
+
+
+def test_coordinator_dispatch_is_nonblocking_for_reader():
+    # The reader-thread half of #20: _dispatch must only post, never route.
+    coord, _ = make_coordinator([])
+    posted = []
+    coord._scheduler.post = lambda fn, delay=0: posted.append(delay)  # pylint: disable=protected-access
+    coord._dispatch(SseEvent(START))         # pylint: disable=protected-access
+    assert posted == [0]                     # queued for the worker, nothing ran inline
 
 
 def test_coordinator_unknown_appliance_triggers_discovery():
     coord, _ = make_coordinator([])
     posted = []
     coord._scheduler.post = lambda fn, delay=0: posted.append(delay)  # pylint: disable=protected-access
-    coord._dispatch(SseEvent(STATUS, haid="UNKNOWN",  # pylint: disable=protected-access
-                             data={"items": []}))
+    coord._route(SseEvent(STATUS, haid="UNKNOWN",  # pylint: disable=protected-access
+                          data={"items": []}))
     assert posted == [0]                     # discovery scheduled immediately
 
 
@@ -601,3 +614,218 @@ def test_event_stream_stable_stream_resets_escalation():
                 monotonic=clock.monotonic).run(stop)
     assert sleeps[2] == 900.0                        # escalated after 3 failures
     assert sleeps[3] == 1.0                          # stable stream reset the count
+
+
+# -- Red-team wave 2 (#15 removal, #20 dispatch, #21 zombie, L3 parser) --------
+
+def test_parse_bare_field_name_is_valid_not_garbage():
+    # SSE allows "data" with no colon (empty value) — it must not restart the
+    # stream. All-hex tokens stay garbage (the injected-chunk-length bug), and
+    # hex lengths often start with a LETTER, not a digit.
+    events = list(parse_sse_lines(lines("event:STATUS\ndata\n\n")))
+    assert events == [{"event": "STATUS", "data": ""}]
+    for garbage in ("1a2f", "cafe", "DEAD", "a2f1"):
+        with pytest.raises(SseParseError):
+            list(parse_sse_lines(lines(f"event:STATUS\n{garbage}\n\n")))
+
+
+def test_depaired_removes_appliance_and_notifies():
+    removed = []
+    api = FakeAPI()
+    api.get_json = lambda path: {"data": {"homeappliances": [
+        {"haId": "HA-GONE", "name": "D", "type": "Dishwasher", "connected": True}]}}
+    coord = HomeConnectCoordinator(api, logger=Mock(), stream=StubStream(),
+                                   on_removed=removed.append)
+    coord._discover()                        # pylint: disable=protected-access
+    assert len(coord.appliances()) == 1
+    coord._route(SseEvent(DEPAIRED, haid="HA-GONE"))  # pylint: disable=protected-access
+    assert coord.appliances() == []
+    assert removed == ["HA-GONE"]
+
+
+def test_discovery_prunes_vanished_appliances():
+    # haId churn: an appliance re-registered under a new haId vanishes from the
+    # list with no DEPAIRED event — a successful pass must prune it.
+    removed = []
+    listings = deque([
+        {"data": {"homeappliances": [
+            {"haId": "HA-A", "name": "A", "type": "Dishwasher", "connected": True},
+            {"haId": "HA-B", "name": "B", "type": "Dryer", "connected": True}]}},
+        {"data": {"homeappliances": [
+            {"haId": "HA-A", "name": "A", "type": "Dishwasher", "connected": True}]}},
+    ])
+    api = FakeAPI()
+    api.get_json = lambda path: listings.popleft()
+    coord = HomeConnectCoordinator(api, logger=Mock(), stream=StubStream(),
+                                   on_removed=removed.append)
+    coord._discover()                        # pylint: disable=protected-access
+    assert len(coord.appliances()) == 2
+    coord._discover()                        # pylint: disable=protected-access
+    assert [a.haid for a in coord.appliances()] == ["HA-A"]
+    assert removed == ["HA-B"]
+
+
+def test_failed_discovery_never_depairs():
+    removed = []
+    listings = deque([
+        {"data": {"homeappliances": [
+            {"haId": "HA-A", "name": "A", "type": "Dishwasher", "connected": True}]}},
+        HomeConnectError("outage", status=503),
+    ])
+
+    def get_json(path):
+        item = listings.popleft()
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    api = FakeAPI()
+    api.get_json = get_json
+    coord = HomeConnectCoordinator(api, logger=Mock(), stream=StubStream(),
+                                   on_removed=removed.append)
+    coord._discover()                        # pylint: disable=protected-access
+    coord._discover()                        # failed pass: fleet must survive
+    assert len(coord.appliances()) == 1
+    assert removed == []
+
+
+class _KeepAliveStream:
+    def __init__(self, count):
+        self._count = count
+
+    def lines(self):
+        for _ in range(self._count):
+            yield "event:KEEP-ALIVE"
+            yield ""
+
+    def close(self):
+        pass
+
+
+def test_zombie_stream_renewed_when_program_active():
+    # Keep-alives keep the 120s watchdog quiet while the backend has stopped
+    # generating events (BSH-confirmed); mid-program that means renew.
+    clock = Clock()
+
+    def ticking_monotonic():
+        clock.t += 1000.0
+        return clock.t
+
+    stream = EventStream(None, dispatch=lambda e: None, logger=Mock(),
+                         monotonic=ticking_monotonic,
+                         activity_check=lambda: True, zombie_after=1500.0)
+    with pytest.raises(HomeConnectError) as exc:
+        list(stream._read_events(_KeepAliveStream(5)))   # pylint: disable=protected-access
+    assert "zombie" in str(exc.value)
+
+
+def test_zombie_stream_left_alone_when_idle():
+    clock = Clock()
+
+    def ticking_monotonic():
+        clock.t += 1000.0
+        return clock.t
+
+    stream = EventStream(None, dispatch=lambda e: None, logger=Mock(),
+                         monotonic=ticking_monotonic,
+                         activity_check=lambda: False, zombie_after=1500.0)
+    assert list(stream._read_events(_KeepAliveStream(5))) == []  # pylint: disable=protected-access
+
+
+def test_real_events_reset_zombie_clock():
+    # A stream interleaving real events with keep-alives must never renew —
+    # otherwise every mid-program stream churns each zombie_after window.
+    clock = Clock()
+
+    def ticking_monotonic():
+        clock.t += 1000.0
+        return clock.t
+
+    class _MixedStream:
+        def lines(self):
+            for _ in range(6):
+                yield "event:KEEP-ALIVE"
+                yield ""
+                yield "event:STATUS"
+                yield "id:H"
+                yield "data:{}"
+                yield ""
+
+        def close(self):
+            pass
+
+    stream = EventStream(None, dispatch=lambda e: None, logger=Mock(),
+                         monotonic=ticking_monotonic,
+                         activity_check=lambda: True, zombie_after=1500.0)
+    events = list(stream._read_events(_MixedStream()))   # pylint: disable=protected-access
+    assert len(events) == 6                              # completed without renewal
+
+
+def test_zombie_renewal_stop_carries_no_error():
+    # The renewal STOP must take the grace-delay path: with an error, every
+    # bridge would flap Off and fire triggers mid-program on every renewal.
+    clock = Clock()
+
+    def ticking_monotonic():
+        clock.t += 1000.0
+        return clock.t
+
+    class _RenewApi:
+        def open_stream(self, path, read_timeout=None, abort_check=None):  # noqa: ARG002
+            return _KeepAliveStream(5)
+
+    stops = []
+    stop = threading.Event()
+
+    def dispatch(event):
+        if event.event == STOP:
+            stops.append(event)
+
+    def fake_sleep(seconds):  # noqa: ARG001
+        stop.set()
+
+    EventStream(_RenewApi(), dispatch=dispatch, logger=Mock(), sleep=fake_sleep,
+                monotonic=ticking_monotonic,
+                activity_check=lambda: True, zombie_after=1500.0).run(stop)
+    assert len(stops) == 1
+    assert stops[0].error is None                        # grace path, no flap
+
+
+def test_discovery_deferred_while_gate_closed():
+    # Discovery runs on the worker that also routes events: it must reschedule,
+    # never block, when the rate-limit gate is closed.
+    api = FakeAPI()
+    api.get_json = Mock()
+    api.gate_wait = 300.0
+    coord = HomeConnectCoordinator(api, logger=Mock(), stream=StubStream())
+    posted = []
+    coord._scheduler.post = lambda fn, delay=0: posted.append(delay)  # pylint: disable=protected-access
+    coord._discover()                        # pylint: disable=protected-access
+    assert not api.get_json.called           # no HTTP attempted
+    assert posted == [301.0]                 # rescheduled past the gate
+
+
+def test_reader_program_swallows_connection_init_failed():
+    # The cloud's "still (re)establishing its own link" 409: treating it as a
+    # failure ground a listed-as-connected appliance through 144 req/day (#16).
+    reader, api = make_reader()
+    api.get_json = Mock(side_effect=HomeConnectError(
+        "x", status=409, key="SDK.Error.HomeAppliance.Connection.Initialization.Failed"))
+    assert reader.get_selected_program("H") is None
+    assert reader.get_active_program("H") is None
+
+
+def test_discovery_with_closed_gate_never_blocks_even_during_shutdown():
+    # A stop() racing an in-flight _discover must not fall through to the
+    # blocking HTTP call: closed gate always skips it, shutdown just skips the
+    # reschedule too.
+    api = FakeAPI()
+    api.get_json = Mock()
+    api.gate_wait = 300.0
+    coord = HomeConnectCoordinator(api, logger=Mock(), stream=StubStream())
+    coord._stop.set()                        # pylint: disable=protected-access
+    posted = []
+    coord._scheduler.post = lambda fn, delay=0: posted.append(delay)  # pylint: disable=protected-access
+    coord._discover()                        # pylint: disable=protected-access
+    assert not api.get_json.called           # no HTTP, no block
+    assert posted == []                      # and no reschedule while stopping
