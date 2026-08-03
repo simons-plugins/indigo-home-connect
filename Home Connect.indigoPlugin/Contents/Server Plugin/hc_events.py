@@ -31,7 +31,7 @@ import threading
 import time
 
 from hc_api import HomeConnectError, STREAM_READ_TIMEOUT, redact
-from hc_appliance import HomeConnectAppliance
+from hc_appliance import HomeConnectAppliance, OPERATION_STATE
 
 EVENTS_PATH = "/api/homeappliances/events"
 APPLIANCES_PATH = "/api/homeappliances"
@@ -51,6 +51,18 @@ RECONNECT_MAX_DELAY = 60.0
 RECONNECT_ESCALATE_AFTER = 5
 RECONNECT_EXTENDED_DELAY = 15 * 60.0
 RECONNECT_STABLE_SECONDS = 120.0
+
+# Zombie-stream detection (BSH-confirmed backend defect: KEEP-ALIVEs continue
+# but state events silently stop — homebridge-homeconnect#74). The 120 s
+# dead-man timer never fires because keep-alives keep arriving, so: when only
+# keep-alives have arrived for this long AND the injected activity check says a
+# program is running (a running appliance emits progress events every few
+# minutes), the stream is presumed zombied and renewed (one counted request).
+ZOMBIE_SUSPECT_SECONDS = 30 * 60.0
+
+# Operation-state tails that count as "a program is running" for the zombie
+# activity check (mirrors hc_control's stoppable set).
+_ACTIVE_OP_TAILS = frozenset({"Run", "DelayedStart", "Pause", "ActionRequired"})
 
 # How often the paused reader re-checks whether authorization has returned.
 AUTH_POLL_INTERVAL = 30.0
@@ -86,6 +98,10 @@ _ABSENT_KEYS = frozenset({
     "SDK.Error.UnsupportedSetting",
     "SDK.Error.UnsupportedOperation",
     "SDK.Simulator.InternalError",
+    # Returned when the cloud has not finished (re)establishing its own link to
+    # the appliance; treating it as a failure ground a listed-as-connected
+    # appliance through 144 retry requests/day (#16).
+    "SDK.Error.HomeAppliance.Connection.Initialization.Failed",
 })
 
 
@@ -139,6 +155,12 @@ def parse_sse_lines(lines):
             continue
         match = _FIELD_RE.match(line)
         if not match:
+            if line.isalnum() and line.isascii() and not line[0].isdigit():
+                # A bare field name with no colon is VALID SSE (empty value) —
+                # it must not restart the stream. Pure digits stay garbage:
+                # that's the API's historic injected-hex-chunk-length bug.
+                fields.setdefault(line, "")
+                continue
             raise SseParseError(f"unparseable SSE line: {line[:80]!r}")
         name, value = match.group(1), match.group(2)
         fields[name] = f"{fields[name]}\n{value}" if name in fields else value
@@ -183,7 +205,8 @@ class EventStream:
                  reconnect_extended=RECONNECT_EXTENDED_DELAY,
                  escalate_after=RECONNECT_ESCALATE_AFTER,
                  stable_seconds=RECONNECT_STABLE_SECONDS,
-                 auth_ok=None, auth_poll=AUTH_POLL_INTERVAL, monotonic=time.monotonic):
+                 auth_ok=None, auth_poll=AUTH_POLL_INTERVAL, monotonic=time.monotonic,
+                 activity_check=None, zombie_after=ZOMBIE_SUSPECT_SECONDS):
         self._api = api
         self._dispatch = dispatch
         self._logger = logger or logging.getLogger("hc_events")
@@ -201,6 +224,10 @@ class EventStream:
         # loop idles and resumes only when authorization returns (PRD §6).
         self._auth_ok = auth_ok
         self._auth_poll = auth_poll
+        # activity_check() -> True while any appliance is mid-program; gates
+        # the zombie-stream renewal so an idle house never churns the stream.
+        self._activity_check = activity_check
+        self._zombie_after = zombie_after
         self._current = None
         self._current_lock = threading.Lock()
 
@@ -275,10 +302,24 @@ class EventStream:
             self._wait(stop_event, backoff)
 
     def _read_events(self, stream):
+        last_real = self._monotonic()
         for fields in parse_sse_lines(stream.lines()):
             event = build_event(fields)
             if not event.event or event.event == KEEP_ALIVE:
-                continue                      # heartbeat: the read already reset the timeout
+                # Heartbeat: the read reset the socket timeout, but keep-alives
+                # alone are also the zombie-stream signature (#21) — a running
+                # appliance emits progress every few minutes, so a long
+                # keep-alive-only stretch mid-program means the backend has
+                # stopped generating events. Renew (one counted request).
+                if (self._activity_check is not None and self._activity_check()
+                        and (self._monotonic() - last_real) >= self._zombie_after):
+                    self._logger.info(
+                        "Home Connect event stream has sent only keep-alives for %.0f min "
+                        "while a program is running — renewing the stream",
+                        (self._monotonic() - last_real) / 60)
+                    raise HomeConnectError("suspected zombie stream", aborted=False)
+                continue
+            last_real = self._monotonic()
             yield event
 
     def close(self):
@@ -428,12 +469,17 @@ class HomeConnectCoordinator:
     def __init__(self, api, logger=None, monotonic=time.monotonic,
                  on_appliance=None, on_event=None, on_discovery=None, supports_programs=True,
                  supports_programs_for=None, discovery_interval=DISCOVERY_INTERVAL,
-                 stream=None, scheduler=None, auth_ok=None):
+                 stream=None, scheduler=None, auth_ok=None, on_removed=None):
         self._api = api
         self._logger = logger or logging.getLogger("hc_events")
         self._monotonic = monotonic
         self._on_appliance = on_appliance     # Phase 3 hook: called once per new appliance
         self._on_event = on_event             # tap for every routed event (tools/tests)
+        # Called with a haId when its appliance leaves the account (DEPAIRED, or
+        # vanished from a successful discovery pass — haId churn); the plugin
+        # detaches the bridge and flags the device instead of leaving it
+        # attached-but-dead forever (#15).
+        self._on_removed = on_removed
         # Called after each completed discovery pass with the set of known haIds,
         # so the plugin can escalate a device whose configured haId never appears
         # (orphaned haId) without issuing any extra API requests.
@@ -450,7 +496,8 @@ class HomeConnectCoordinator:
         self._reader = ApiReader(api)
         self._scheduler = scheduler or Scheduler(logger=self._logger, monotonic=monotonic)
         self._stream = stream or EventStream(api, dispatch=self._dispatch,
-                                             logger=self._logger, auth_ok=auth_ok)
+                                             logger=self._logger, auth_ok=auth_ok,
+                                             activity_check=self._any_program_active)
 
         self._lock = threading.RLock()
         self._appliances = {}
@@ -509,6 +556,14 @@ class HomeConnectCoordinator:
         with self._lock:
             return list(self._appliances.values())
 
+    def _any_program_active(self):
+        """True while any known appliance is mid-program (zombie-check gate)."""
+        for appliance in self.appliances():
+            op = appliance.get(OPERATION_STATE)
+            if isinstance(op, str) and op.rsplit(".", 1)[-1] in _ACTIVE_OP_TAILS:
+                return True
+        return False
+
     # -- Discovery -----------------------------------------------------------
     def _discover(self):
         try:
@@ -519,6 +574,15 @@ class HomeConnectCoordinator:
         if found is not None:
             for info in found:
                 self._ensure_appliance(info)
+            # An appliance no longer listed left the account (deleted, or
+            # re-paired under a new haId). Prune it, or its bridge stays
+            # attached to a dead object forever (#15). Only on a SUCCESSFUL
+            # pass — a failed list must never depair the fleet.
+            found_haids = {info.get("haId") for info in found}
+            with self._lock:
+                stale = [haid for haid in self._appliances if haid not in found_haids]
+            for haid in stale:
+                self._remove_appliance(haid, "absent from discovery")
             if self._on_discovery:
                 try:
                     self._on_discovery({a.haid for a in self.appliances()})
@@ -526,6 +590,20 @@ class HomeConnectCoordinator:
                     self._logger.exception(exc)
         if not self._stop.is_set():
             self._scheduler.post(self._discover, self._discovery_interval)
+
+    def _remove_appliance(self, haid, reason):
+        with self._lock:
+            appliance = self._appliances.pop(haid, None)
+        if appliance is None:
+            return
+        self._logger.warning("Home Connect appliance %s left the account (%s)",
+                             appliance.name, reason)
+        appliance.on_disconnected()           # abandon any queued reads
+        if self._on_removed:
+            try:
+                self._on_removed(haid)
+            except Exception as exc:  # pylint: disable=broad-except
+                self._logger.exception(exc)
 
     def _ensure_appliance(self, info):
         haid = info.get("haId")
@@ -553,8 +631,19 @@ class HomeConnectCoordinator:
             appliance.on_paired()             # initial state re-read
         return appliance
 
-    # -- Dispatch (runs on the reader thread) --------------------------------
+    # -- Dispatch ------------------------------------------------------------
     def _dispatch(self, event):
+        """Hand the event to the worker thread (reader thread must stay fast).
+
+        Routing runs observer callbacks that end in Indigo state writes — an
+        IPC round-trip to the Indigo server. Doing that on the reader thread
+        let a slow Indigo server stall SSE reads past the 120 s dead-stream
+        timeout (spurious reconnect + re-read burst, #20). The scheduler is a
+        single thread, so event ordering is preserved."""
+        self._scheduler.post(lambda: self._route(event), 0)
+
+    # -- Routing (runs on the worker thread) ---------------------------------
+    def _route(self, event):
         if self._on_event:
             try:
                 self._on_event(event)
@@ -576,6 +665,10 @@ class HomeConnectCoordinator:
             if appliance is not None:
                 appliance.on_paired()
             return
+        if etype == DEPAIRED:
+            if event.haid:
+                self._remove_appliance(event.haid, "DEPAIRED")
+            return
 
         haid = event.haid
         if not haid:
@@ -593,7 +686,7 @@ class HomeConnectCoordinator:
             appliance.handle_event_items(event.items())
         elif etype == CONNECTED:
             appliance.on_connected()
-        elif etype in (DISCONNECTED, DEPAIRED):
+        elif etype == DISCONNECTED:
             appliance.on_disconnected()
         else:
             self._logger.debug("Home Connect event %s ignored", etype)
