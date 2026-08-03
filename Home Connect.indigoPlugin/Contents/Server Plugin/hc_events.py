@@ -13,10 +13,17 @@ daily-budget request). This module:
   a 429 ``Retry-After`` through ``hc_api``'s shared request gate, with backoff
   escalating to 15 min after sustained failures (every open is a counted
   request);
-* routes wire events (STATUS/EVENT/NOTIFY/CONNECTED/DISCONNECTED/PAIRED/DEPAIRED)
-  to the right :class:`~hc_appliance.HomeConnectAppliance`;
+* routes wire events on the single worker thread (the reader only parses and
+  enqueues — routing ends in Indigo state writes, which must never stall the
+  socket read): STATUS/EVENT/NOTIFY/CONNECTED/DISCONNECTED to the right
+  :class:`~hc_appliance.HomeConnectAppliance`; PAIRED/DEPAIRED add/remove
+  appliances from the registry, and a successful discovery pass prunes haIds
+  that vanished from the account;
+* renews a suspected zombie stream (keep-alives only for 30 min while a
+  program is running — a BSH-confirmed backend failure mode);
 * discovers appliances at most hourly and runs each appliance's sequential
-  re-read queue on a single worker thread.
+  re-read queue on the same worker thread, deferring (never blocking) when the
+  rate-limit gate is closed.
 
 The coordinator is folded into this module (rather than a separate
 ``hc_coordinator.py``) because it owns the SSE reader and the worker that runs
@@ -37,6 +44,10 @@ EVENTS_PATH = "/api/homeappliances/events"
 APPLIANCES_PATH = "/api/homeappliances"
 
 DISCOVERY_INTERVAL = 60 * 60          # appliance-list poll at most hourly (PRD §3.5)
+
+# One-shot warning threshold for the worker queue: routing shares the worker
+# thread, so a queue this deep means events are piling up behind a stall.
+QUEUE_DEPTH_WARN = 500
 
 # Reconnect backoff for non-429 stream failures (429 is handled by the gate).
 RECONNECT_MIN_DELAY = 1.0
@@ -82,8 +93,13 @@ DEPAIRED = "DEPAIRED"
 _ITEM_EVENTS = frozenset({STATUS, EVENT, NOTIFY})
 
 # A valid SSE field line: "name: value" (single optional space). Anything else
-# that is not blank and not a comment is structural garbage -> restart.
+# that is not blank, not a comment and not a bare known field name (see
+# _BARE_FIELD_NAMES below) is structural garbage -> restart.
 _FIELD_RE = re.compile(r"^(\w+):[ ]?(.*)$")
+
+# The real SSE field names — the only bare (colon-less) tokens accepted as
+# empty-value fields rather than treated as stream corruption.
+_BARE_FIELD_NAMES = frozenset({"event", "data", "id", "retry"})
 
 # Errors from a state read that mean "feature absent", not a failure (PRD §3.4).
 # ``UnsupportedOperation`` is returned by settings-only appliances (fridge,
@@ -155,12 +171,13 @@ def parse_sse_lines(lines):
             continue
         match = _FIELD_RE.match(line)
         if not match:
-            if (line.isalnum() and line.isascii()
-                    and not all(c in "0123456789abcdefABCDEF" for c in line)):
-                # A bare field name with no colon is VALID SSE (empty value) —
-                # it must not restart the stream. All-hex tokens stay garbage:
-                # that's the API's historic injected-chunk-length bug, and hex
-                # lengths often start with a letter ("cafe", "a2f1").
+            if line in _BARE_FIELD_NAMES:
+                # A bare KNOWN field name with no colon is valid SSE (empty
+                # value) — it must not restart the stream. Any other bare token
+                # stays garbage: this API's corruption habit (injected chunk
+                # lengths, fragmented lines) makes an unknown bare token far
+                # more likely a broken real line than a novel field, and
+                # silently absorbing it would silently LOSE the event.
                 fields.setdefault(line, "")
                 continue
             raise SseParseError(f"unparseable SSE line: {line[:80]!r}")
@@ -270,7 +287,14 @@ class EventStream:
                     self._dispatch(event)
             except HomeConnectError as exc:
                 error = exc
-                if stop_event.is_set() or exc.aborted:
+                if getattr(exc, "zombie_renewal", False):
+                    # Deliberate renewal (already logged at info): dispatch the
+                    # STOP without an error so appliances take the grace-delay
+                    # path — the ~1s reconnect supersedes the disconnect and no
+                    # device flaps Off / fires triggers mid-program.
+                    error = None
+                    self._logger.debug("Home Connect event stream renewed (zombie suspected)")
+                elif stop_event.is_set() or exc.aborted:
                     # Deliberate teardown: stop() closed the socket under the
                     # blocked read, or abort() fired just before the stop event
                     # was set — expected either way, not a warning.
@@ -319,7 +343,9 @@ class EventStream:
                         "Home Connect event stream has sent only keep-alives for %.0f min "
                         "while a program is running — renewing the stream",
                         (self._monotonic() - last_real) / 60)
-                    raise HomeConnectError("suspected zombie stream", aborted=False)
+                    renewal = HomeConnectError("suspected zombie stream")
+                    renewal.zombie_renewal = True
+                    raise renewal
                 continue
             last_real = self._monotonic()
             yield event
@@ -354,6 +380,12 @@ class ApiReader:
 
     def __init__(self, api):
         self._api = api
+
+    def gate_wait_remaining(self):
+        """Seconds until the shared request gate opens (see #20 defer rule:
+        readers on the worker thread must reschedule, never block the gate —
+        the same thread routes every live SSE event)."""
+        return self._api.gate_wait_remaining()
 
     def list_appliances(self):
         data = self._api.get_json(APPLIANCES_PATH)
@@ -407,8 +439,10 @@ class Scheduler:
     """A single-thread job scheduler: ``post(fn, delay)`` runs ``fn`` later.
 
     Used for the per-appliance re-read queues (which reschedule themselves with
-    backoff) and the hourly discovery poll. ``run_pending`` lets tests drive it
-    synchronously with a controllable clock.
+    backoff), the hourly discovery poll and — since the reader-thread split —
+    routing every SSE event; same-deadline jobs run FIFO via the sequence
+    tie-break, which is what preserves event ordering. ``run_pending`` lets
+    tests drive it synchronously with a controllable clock.
     """
 
     def __init__(self, logger=None, monotonic=time.monotonic):
@@ -422,6 +456,11 @@ class Scheduler:
         with self._cond:
             self._seq += 1
             heapq.heappush(self._heap, (self._monotonic() + delay, self._seq, fn))
+            if len(self._heap) == QUEUE_DEPTH_WARN:
+                # Routing shares this thread (#20): depth like this means the
+                # worker is stalled (slow Indigo IPC?) while events pile up.
+                self._logger.warning("Home Connect worker queue depth reached %d — "
+                                     "event processing is falling behind", QUEUE_DEPTH_WARN)
             self._cond.notify()
 
     def wake(self):
@@ -568,6 +607,13 @@ class HomeConnectCoordinator:
 
     # -- Discovery -----------------------------------------------------------
     def _discover(self):
+        # Never block the worker at the rate-limit gate: this thread routes
+        # every live SSE event, so a gate-blocked HTTP call here would freeze
+        # device updates for the whole Retry-After. Defer instead.
+        wait = self._reader.gate_wait_remaining()
+        if wait > 0 and not self._stop.is_set():
+            self._scheduler.post(self._discover, min(wait + 1.0, self._discovery_interval))
+            return
         try:
             found = self._reader.list_appliances()
         except HomeConnectError as exc:
@@ -670,6 +716,8 @@ class HomeConnectCoordinator:
         if etype == DEPAIRED:
             if event.haid:
                 self._remove_appliance(event.haid, "DEPAIRED")
+            else:
+                self._logger.debug("Home Connect DEPAIRED without haId ignored")
             return
 
         haid = event.haid
