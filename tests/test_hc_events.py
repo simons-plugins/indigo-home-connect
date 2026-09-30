@@ -13,7 +13,7 @@ import pytest
 import hc_events
 from hc_api import HomeConnectAPI, HomeConnectError
 from hc_events import (ApiReader, EventStream, HomeConnectCoordinator, Scheduler,
-                       SseEvent, SseParseError, build_event, parse_sse_lines,
+                       SseEvent, format_stream_status, SseParseError, build_event, parse_sse_lines,
                        START, STOP, STATUS, DEPAIRED)
 from support import Clock, FakeAPI, ScriptedTransport
 
@@ -829,3 +829,375 @@ def test_discovery_with_closed_gate_never_blocks_even_during_shutdown():
     coord._discover()                        # pylint: disable=protected-access
     assert not api.get_json.called           # no HTTP, no block
     assert posted == []                      # and no reschedule while stopping
+
+
+# -- Liveness counters / stream status (#26) -----------------------------------
+
+class _ClockedStream:
+    """Yields keep-alive at t=10 and a STATUS at t=20 on the shared test clock."""
+
+    def __init__(self, clock):
+        self._clock = clock
+
+    def lines(self):
+        self._clock.t = 10.0
+        yield "event:KEEP-ALIVE"
+        yield ""
+        self._clock.t = 20.0
+        yield "event:STATUS"
+        yield "id:H"
+        yield "data:{}"
+        yield ""
+
+    def close(self):
+        pass
+
+
+def test_stream_stats_before_anything_reports_nothing_not_health():
+    stats = EventStream(None, dispatch=lambda e: None, logger=Mock()).stats()
+    assert stats["connected"] is False
+    assert stats["connected_for"] is None and stats["last_connect_age"] is None
+    assert stats["keepalives"] == 0 and stats["wire_events"] == 0
+    assert stats["last_keepalive_age"] is None and stats["last_wire_event_age"] is None
+
+
+def test_stream_counts_keepalives_separately_and_ages_use_injected_clock():
+    clock = Clock()
+    stream = EventStream(None, dispatch=lambda e: None, logger=Mock(),
+                         monotonic=clock.monotonic)
+    got = list(stream._read_events(_ClockedStream(clock)))   # pylint: disable=protected-access
+    assert [e.event for e in got] == [STATUS]
+    clock.t = 50.0
+    stats = stream.stats()
+    assert stats["keepalives"] == 1 and stats["wire_events"] == 1
+    assert stats["last_keepalive_age"] == pytest.approx(40.0)
+    assert stats["last_wire_event_age"] == pytest.approx(30.0)
+    assert stats["last_wire_event_type"] == STATUS
+
+
+def test_stream_counters_survive_reconnect_and_connected_since_clears():
+    transport = ScriptedTransport()
+    transport.queue_stream(200, HC_JSON, [b"event:KEEP-ALIVE\n\nevent:STATUS\nid:H\ndata:{}\n\n", b""])
+    transport.queue_stream(200, HC_JSON, [b"event:KEEP-ALIVE\n\nevent:NOTIFY\nid:H\ndata:{}\n\n", b""])
+    clock = Clock()
+    api = make_api(transport, clock)
+    stop = threading.Event()
+    stops = []
+    while_connected = []
+
+    def dispatch(event):
+        if event.event == START:
+            while_connected.append(stream.stats())
+        if event.event == STOP:
+            stops.append(stream.stats())
+            if len(stops) == 2:
+                stop.set()
+
+    stream = EventStream(api, dispatch=dispatch, logger=Mock(), sleep=clock.sleep,
+                         monotonic=clock.monotonic)
+    stream.run(stop)
+    assert all(s["connected"] for s in while_connected) and len(while_connected) == 2
+    assert [s["connected"] for s in stops] == [False, False]   # cleared before STOP dispatches
+    stats = stream.stats()
+    assert stats["connected"] is False and stats["connected_for"] is None   # cleared at stream end
+    assert stats["last_connect_age"] is not None
+    assert stats["keepalives"] == 2 and stats["wire_events"] == 2           # not reset on reconnect
+    assert stats["last_wire_event_type"] == "NOTIFY"
+
+
+# -- Coordinator: per-appliance last message + diagnostics logging -------------
+
+RAW_HAID = "HAID-12345678901234"
+_DW = {"haId": RAW_HAID, "name": "Dishwasher", "type": "Dishwasher", "connected": True}
+
+
+class _StatsStream(StubStream):
+    def stats(self):
+        return {"connected": True, "connected_for": 5.0}
+
+
+def make_diag_coordinator(appliances, clock):
+    api = FakeAPI()
+    api.get_json = lambda path: {"data": {"homeappliances": appliances}}
+    logger = Mock()
+    coord = HomeConnectCoordinator(api, logger=logger, stream=_StatsStream(),
+                                   monotonic=clock.monotonic)
+    coord._discover()                        # pylint: disable=protected-access
+    return coord, logger
+
+
+def _status(haid=RAW_HAID, keys=("BSH.Common.Status.DoorState",), value="Open"):
+    return SseEvent(STATUS, haid=haid,
+                    data={"items": [{"key": k, "value": value} for k in keys]})
+
+
+def test_routed_status_records_last_message_and_logs_debug_without_values_or_haid():
+    clock = Clock()
+    coord, logger = make_diag_coordinator([_DW], clock)
+    clock.t = 100.0
+    coord._route(_status(keys=("BSH.Common.Status.DoorState",     # pylint: disable=protected-access
+                               "BSH.Common.Status.OperationState")))
+    clock.t = 160.0
+    entry = coord.stream_status()["appliances"][0]
+    assert entry["last_message_type"] == STATUS
+    assert entry["last_message_age"] == pytest.approx(60.0)
+    assert entry["name"] == "Dishwasher" and entry["haid"] != RAW_HAID
+    lines = [c.args[0] % c.args[1:] for c in logger.debug.call_args_list
+             if c.args and c.args[0].startswith("Home Connect event %s for")]
+    assert lines == ["Home Connect event STATUS for Dishwasher (2 item(s): DoorState, OperationState)"]
+    assert "Open" not in lines[0] and RAW_HAID not in lines[0]
+    args = [c.args for c in logger.debug.call_args_list
+            if c.args and c.args[0].startswith("Home Connect event %s for")][0]
+    assert not any(arg in (RAW_HAID, "Open") for arg in args[1:])
+
+
+def test_debug_line_handles_non_dict_and_empty_items():
+    coord, logger = make_diag_coordinator([_DW], Clock())
+    coord._get(RAW_HAID).merge_items = lambda items: None    # pylint: disable=protected-access
+    coord._route(SseEvent(STATUS, haid=RAW_HAID,                     # pylint: disable=protected-access
+                          data={"items": ["stray", 5, {"key": "A.B.DoorState", "value": "Open"}]}))
+    coord._route(SseEvent(STATUS, haid=RAW_HAID, data={"items": []}))  # pylint: disable=protected-access
+    lines = [c.args[0] % c.args[1:] for c in logger.debug.call_args_list
+             if c.args and c.args[0].startswith("Home Connect event %s for")]
+    assert lines == ["Home Connect event STATUS for Dishwasher (1 item(s): DoorState)",
+                     "Home Connect event STATUS for Dishwasher (0 item(s): none)"]
+
+
+def test_debug_line_caps_key_list_at_five():
+    coord, logger = make_diag_coordinator([_DW], Clock())
+    coord._route(_status(keys=tuple(f"A.B.K{i}" for i in range(7))))   # pylint: disable=protected-access
+    args = [c.args for c in logger.debug.call_args_list
+            if c.args and c.args[0].startswith("Home Connect event %s for")][0]
+    assert args[3] == 7 and args[4] == "K0, K1, K2, K3, K4, …"
+
+
+def _first_lines(logger):
+    return [c.args for c in logger.info.call_args_list
+            if c.args and "first event after connect" in c.args[0]]
+
+
+def test_first_event_info_fires_once_per_start_not_before_start():
+    coord, logger = make_diag_coordinator([_DW], Clock())
+    coord._route(_status())                  # pylint: disable=protected-access
+    assert _first_lines(logger) == []        # no START yet
+    coord._route(SseEvent(START))            # pylint: disable=protected-access
+    coord._route(_status())                  # pylint: disable=protected-access
+    coord._route(_status())                  # pylint: disable=protected-access
+    assert len(_first_lines(logger)) == 1
+    assert _first_lines(logger)[0][1:] == (STATUS, "Dishwasher")
+    coord._route(SseEvent(START))            # pylint: disable=protected-access
+    coord._route(SseEvent("NOTIFY", haid=RAW_HAID, data={"items": []}))  # pylint: disable=protected-access
+    assert len(_first_lines(logger)) == 2
+
+
+def test_connection_notice_does_not_consume_first_event_line():
+    coord, logger = make_diag_coordinator([_DW], Clock())
+    coord._route(SseEvent(START))            # pylint: disable=protected-access
+    coord._route(SseEvent("CONNECTED", haid=RAW_HAID))     # pylint: disable=protected-access
+    coord._route(SseEvent("DISCONNECTED", haid=RAW_HAID))  # pylint: disable=protected-access
+    assert _first_lines(logger) == []
+    coord._route(_status())                  # pylint: disable=protected-access
+    assert len(_first_lines(logger)) == 1
+    coord._route(SseEvent(STOP))             # pylint: disable=protected-access
+    coord._route(SseEvent(START))            # pylint: disable=protected-access
+    coord._route(_status())                  # pylint: disable=protected-access
+    assert len(_first_lines(logger)) == 2
+
+
+def test_diagnostics_failure_never_drops_the_state_merge(monkeypatch):
+    coord, logger = make_diag_coordinator([_DW], Clock())
+    appliance = coord._get(RAW_HAID)         # pylint: disable=protected-access
+    merged = []
+    appliance.merge_items = merged.append
+
+    def boom(_self):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(type(appliance), "name", property(boom))
+    coord._route(_status())                  # pylint: disable=protected-access
+    assert len(merged) == 1                  # STATUS items still reached the appliance
+    logger.exception.assert_called_once_with("Home Connect event diagnostics failed")
+
+
+def test_unknown_appliance_event_creates_no_last_message_and_no_first_event_line():
+    coord, logger = make_diag_coordinator([_DW], Clock())
+    coord._scheduler.post = lambda fn, delay=0: None                # pylint: disable=protected-access
+    coord._route(SseEvent(START))            # pylint: disable=protected-access
+    coord._route(_status(haid="UNKNOWN-HAID-000000"))               # pylint: disable=protected-access
+    assert coord.stream_status()["appliances"][0]["last_message_age"] is None
+    assert not [c for c in logger.info.call_args_list
+                if c.args and "first event after connect" in c.args[0]]
+
+
+def test_appliance_without_messages_reports_none_not_zero():
+    other = {"haId": "OTHER-HAID-1234567", "name": "Oven", "type": "Oven", "connected": False}
+    coord, _ = make_diag_coordinator([_DW, other], Clock())
+    coord._route(_status())                  # pylint: disable=protected-access
+    entries = {e["name"]: e for e in coord.stream_status()["appliances"]}
+    assert entries["Dishwasher"]["last_message_type"] == STATUS
+    assert entries["Oven"]["last_message_age"] is None and entries["Oven"]["connected"] is False
+    assert coord.stream_status()["connected"] is True     # stream stats merged in
+
+
+# -- format_stream_status verdicts ----------------------------------------------
+
+def _st(**kw):
+    base = {"connected": True, "connected_for": 600.0, "last_connect_age": 600.0,
+            "keepalives": 0, "last_keepalive_age": None, "wire_events": 0,
+            "last_wire_event_age": None, "last_wire_event_type": None,
+            "appliances": [], "requests_today": 7, "daily_budget": 1000}
+    base.update(kw)
+    return base
+
+
+def _verdict(status):
+    return format_stream_status(status)[-1]
+
+
+def test_verdict_a_not_connected_never_claims_events():
+    # Events were received earlier in the process, but the stream is down now.
+    out = format_stream_status(_st(connected=False, connected_for=None, last_connect_age=180.0,
+                                   wire_events=3, last_wire_event_age=200.0,
+                                   last_wire_event_type=STATUS))
+    assert "NOT connected" in out[1] and "last connected 3m ago" in out[1]
+    assert "NOT connected" in out[-1]
+    assert "receiving events" not in " ".join(out)
+
+
+def test_verdict_a_never_connected():
+    out = format_stream_status(_st(connected=False, connected_for=None, last_connect_age=None))
+    assert "never connected since plugin start" in out[1]
+
+
+def test_verdict_b_connected_ten_minutes_keepalives_zero_events_is_not_healthy():
+    out = format_stream_status(_st(connected_for=600.0, keepalives=14, last_keepalive_age=32.0))
+    assert "NO events received in 10m" in out[-1]
+    assert "trigger a change" in out[-1] and "KEEP-ALIVE frames seen: yes" in out[-1]
+    assert "the cloud is sending nothing" not in out[-1]
+    assert "arriving" not in " ".join(out)
+    assert "  keep-alives: 14 (last 32s ago)" in out
+    assert "  wire events: 0 since plugin start" in out
+
+
+def test_verdict_b_without_keepalives_words_neutrally():
+    verdict = _verdict(_st(connected_for=900.0))
+    assert "NO events received in 15m" in verdict and "KEEP-ALIVE frames seen: no" in verdict
+
+
+def test_verdict_b_events_only_from_a_previous_connection_do_not_count():
+    # Per-process counter says 3 events, but the last one predates this connection.
+    verdict = _verdict(_st(connected_for=600.0, wire_events=3, last_wire_event_age=4000.0,
+                           last_wire_event_type=STATUS))
+    assert "NO events received in 10m" in verdict
+
+
+def test_verdict_c_too_early_to_call_it_silent():
+    verdict = _verdict(_st(connected_for=120.0))
+    assert "connected 2m ago, no events yet (too early to call it silent)" in verdict
+
+
+def _app(name="Dishwasher", age=240.0, kind=STATUS):
+    return {"name": name, "type": "Dishwasher", "haid": "1040…4372", "connected": True,
+            "last_message_age": age, "last_message_type": kind}
+
+
+def test_verdict_d_status_updates_arriving_is_neutral_not_normal():
+    out = format_stream_status(_st(connected_for=3600.0, wire_events=3, last_wire_event_age=240.0,
+                                   last_wire_event_type=STATUS, appliances=[_app()]))
+    assert "  wire events: 3 (last STATUS 4m ago)" in out
+    assert out[1] == "  stream: connected for 1h00m"
+    assert out[-1] == ("  verdict: status updates are arriving (last STATUS for Dishwasher 4m ago); "
+                       "an idle appliance can legitimately be quiet")
+    assert "normally" not in out[-1]
+
+
+def test_verdict_status_from_before_this_connection_does_not_count():
+    verdict = _verdict(_st(connected_for=600.0, wire_events=3, last_wire_event_age=4000.0,
+                           appliances=[_app(age=4000.0)]))
+    assert "NO events received" in verdict and "arriving" not in verdict
+
+
+def test_verdict_only_connection_events_is_not_status_updates():
+    verdict = _verdict(_st(connected_for=600.0, wire_events=2, last_wire_event_age=30.0,
+                           last_wire_event_type="CONNECTED",
+                           appliances=[_app(age=30.0, kind="CONNECTED")]))
+    assert "only connection events so far (last CONNECTED 30s ago), no status updates" in verdict
+    assert "arriving" not in verdict
+
+
+def test_verdict_events_not_routed_to_any_known_appliance():
+    verdict = _verdict(_st(connected_for=600.0, wire_events=3, last_wire_event_age=30.0,
+                           last_wire_event_type=STATUS,
+                           appliances=[_app(age=None, kind=None)]))
+    assert "none were routed" in verdict and "3 wire events" in verdict
+    assert "status updates are arriving" not in verdict
+
+
+def test_verdict_only_connection_and_unknown_events_fed_through_a_real_stream():
+    clock = Clock()
+    coord, _ = make_diag_coordinator([_DW], clock)
+    stream = EventStream(None, dispatch=lambda e: None, logger=Mock(), monotonic=clock.monotonic)
+    coord._stream = stream                   # pylint: disable=protected-access
+    coord._scheduler.post = lambda fn, delay=0: None          # pylint: disable=protected-access
+    stream._set_connected(0.0)               # pylint: disable=protected-access
+
+    class _Wire:
+        def lines(self):
+            clock.t = 30.0
+            yield from ["event:CONNECTED", "id:" + RAW_HAID, "data:{}", "",
+                        "event:DISCONNECTED", "id:" + RAW_HAID, "data:{}", "",
+                        "event:SOMETHING-NEW", "data:{}", ""]
+
+    for event in stream._read_events(_Wire()):                # pylint: disable=protected-access
+        coord._route(event)                  # pylint: disable=protected-access
+    clock.t = 60.0
+    status = coord.stream_status()
+    assert status["wire_events"] == 3
+    verdict = _verdict(status)
+    assert "only connection events so far (last DISCONNECTED" in verdict
+    assert "status updates are arriving" not in verdict
+
+
+def test_reconnect_with_only_keepalives_reads_silent_after_five_minutes():
+    clock = Clock()
+    stream = EventStream(None, dispatch=lambda e: None, logger=Mock(), monotonic=clock.monotonic)
+    # Connection 1 delivered a STATUS (counters are per-process and survive).
+    list(stream._read_events(_ClockedStream(clock)))         # pylint: disable=protected-access
+    assert stream.stats()["wire_events"] == 1
+    seen = {}
+
+    class _KeepAlivesOnly:
+        def lines(self):
+            clock.t = 1000.0
+            stream._set_connected(clock.t)   # pylint: disable=protected-access
+            yield "event:KEEP-ALIVE"
+            yield ""
+            clock.t = 1000.0 + 360.0
+            yield "event:KEEP-ALIVE"
+            yield ""
+            seen["status"] = stream.stats()
+
+    assert list(stream._read_events(_KeepAlivesOnly())) == []   # pylint: disable=protected-access
+    status = seen["status"]
+    status["appliances"] = [_app(age=1e6)]   # its STATUS predates this connection
+    verdict = _verdict(status)
+    assert "NO events received in 6m" in verdict
+    assert "KEEP-ALIVE frames seen: yes" in verdict and "arriving" not in verdict
+
+
+def test_format_lists_appliances_and_request_budget():
+    out = format_stream_status(_st(appliances=[
+        {"name": "Dishwasher", "type": "Dishwasher", "haid": "1040…4372", "connected": True,
+         "last_message_age": 240.0, "last_message_type": "NOTIFY"},
+        {"name": "Oven", "type": None, "haid": "2222…9999", "connected": False,
+         "last_message_age": None, "last_message_type": None}]))
+    assert ("  Dishwasher [Dishwasher] haId=1040…4372: connected=True, "
+            "last message: NOTIFY 4m ago") in out
+    assert ("  Oven [?] haId=2222…9999: connected=False, "
+            "last message: none since plugin start") in out
+    assert "  requests today: 7/1000" in out
+
+
+def test_format_reports_request_counter_unavailable_explicitly():
+    out = format_stream_status(_st(requests_today="unavailable", daily_budget=None))
+    assert "  requests today: unavailable" in out

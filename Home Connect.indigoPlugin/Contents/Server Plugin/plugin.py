@@ -17,11 +17,11 @@ import indigo
 import hc_constants as hc
 import hc_control
 from device_bridge import ApplianceBridge
-from hc_api import HomeConnectAPI, HomeConnectError, PROD_HOST, SIMULATOR_HOST, redact
+from hc_api import DAILY_BUDGET, HomeConnectAPI, HomeConnectError, PROD_HOST, SIMULATOR_HOST, redact
 from hc_auth import (HomeConnectAuth, STATE_AUTHORIZED, STATE_PENDING,
                      STATE_AUTH_REQUIRED, STATE_UNAUTHORIZED)
 from hc_cache import DiskCache
-from hc_events import HomeConnectCoordinator
+from hc_events import HomeConnectCoordinator, format_stream_status
 
 TOKEN_FILENAME = "com.simons-plugins.homeconnect.tokens.json"
 CACHE_FILENAME = "com.simons-plugins.homeconnect.capabilities.json"
@@ -473,6 +473,28 @@ class Plugin(indigo.PluginBase):
             self.logger.info("  %s [%s] haId=%s connected=%s",
                              appliance.name, appliance.type or "?",
                              redact(appliance.haid), appliance.connected)
+
+    def logEventStreamStatus(self):
+        with self._coord_lock:
+            coordinator = self._coordinator
+            api = self._coordinator_api
+        if coordinator is None:
+            self.logger.info("Home Connect: no event stream running (authorize the plugin first).")
+            return
+        try:
+            status = coordinator.stream_status()
+        except Exception as exc:  # pylint: disable=broad-except
+            self.logger.exception(exc)
+            self.logger.error("Home Connect event stream status could not be read; "
+                              "see the traceback above.")
+            return
+        if api is not None:
+            status["requests_today"] = api.request_count
+            status["daily_budget"] = DAILY_BUDGET
+        else:
+            status["requests_today"] = "unavailable"
+        for line in format_stream_status(status):
+            self.logger.info(line)
 
     # -- Control actions (Phase 4) -------------------------------------------
     def startProgram(self, action, dev=None):  # noqa: N802,N803

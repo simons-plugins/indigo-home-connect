@@ -4,4 +4,8 @@
 		<Name>Log Discovered Appliances</Name>
 		<CallbackMethod>logDiscoveredAppliances</CallbackMethod>
 	</MenuItem>
+	<MenuItem id="logEventStreamStatus">
+		<Name>Log Event Stream Status</Name>
+		<CallbackMethod>logEventStreamStatus</CallbackMethod>
+	</MenuItem>
 </MenuItems>

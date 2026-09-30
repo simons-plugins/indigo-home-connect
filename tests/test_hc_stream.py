@@ -147,3 +147,14 @@ def test_stream_close_shuts_down_socket_before_close():
     assert conn.closed == 1
     stream.close()                          # idempotent
     assert conn.closed == 1
+
+
+def test_request_count_property_reports_today_and_zero_after_day_rollover():
+    transport = ScriptedTransport()
+    transport.queue_stream(200, HC_JSON, [b""])
+    api = make_api(transport)
+    assert api.request_count == 0
+    api.open_stream("/api/homeappliances/events")
+    assert api.request_count == 1
+    api._wall_now = lambda: datetime(2026, 8, 3, tzinfo=timezone.utc)  # pylint: disable=protected-access
+    assert api.request_count == 0            # stale yesterday count must not read as today's

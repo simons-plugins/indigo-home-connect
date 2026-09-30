@@ -359,3 +359,7 @@ def test_abort_during_retry_backoff_raises():
         api.get_json("/api/homeappliances")
     assert exc.value.aborted
     assert len(transport.requests) == 1    # the retry never fired
+
+
+def test_request_count_is_zero_when_never_counted():
+    assert make_api(ScriptedTransport()).request_count == 0
