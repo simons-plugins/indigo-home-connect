@@ -738,7 +738,7 @@ def test_real_events_reset_zombie_clock():
     clock = Clock()
 
     def ticking_monotonic():
-        clock.t += 1000.0
+        clock.t += 100.0
         return clock.t
 
     class _MixedStream:
@@ -759,6 +759,59 @@ def test_real_events_reset_zombie_clock():
                          activity_check=lambda: True, zombie_after=1500.0)
     events = list(stream._read_events(_MixedStream()))   # pylint: disable=protected-access
     assert len(events) == 6                              # completed without renewal
+
+
+class _ScriptedLines:
+    def __init__(self, clock, script):
+        self._clock = clock
+        self._script = script
+
+    def lines(self):
+        for at, line in self._script:
+            self._clock.t = at
+            yield line
+
+    def close(self):
+        pass
+
+
+def test_raw_lines_counted_before_the_parser_drops_them():
+    clock = Clock()
+    stream = EventStream(None, dispatch=lambda e: None, logger=Mock(), monotonic=clock.monotonic)
+    script = [(10.0, ": hb"), (20.0, ""), (30.0, "event:KEEP-ALIVE"), (40.0, ""), (50.0, ":")]
+    assert list(stream._read_events(_ScriptedLines(clock, script))) == []   # pylint: disable=protected-access
+    clock.t = 100.0
+    stats = stream.stats()
+    assert stats["raw_lines"] == 5
+    assert stats["comment_heartbeats"] == 2           # only the ":" lines
+    assert stats["last_raw_line_age"] == 50.0         # 100 - 50
+    assert stats["keepalives"] == 1
+
+
+def test_raw_line_stats_report_none_age_before_any_line():
+    stream = EventStream(None, dispatch=lambda e: None, logger=Mock(), monotonic=Clock().monotonic)
+    stats = stream.stats()
+    assert (stats["raw_lines"], stats["comment_heartbeats"], stats["last_raw_line_age"]) == (0, 0, None)
+
+
+def test_comment_only_stream_never_triggers_zombie_renewal():
+    clock = Clock()
+    script = [(i * 1000.0, ": hb") for i in range(1, 20)]
+    stream = EventStream(None, dispatch=lambda e: None, logger=Mock(), monotonic=clock.monotonic,
+                         activity_check=lambda: True, zombie_after=1500.0)
+    assert list(stream._read_events(_ScriptedLines(clock, script))) == []   # pylint: disable=protected-access
+    assert stream.stats()["comment_heartbeats"] == 19
+    assert stream.stats()["keepalives"] == 0
+
+
+def test_keepalive_frames_still_trigger_zombie_renewal_amid_comments():
+    clock = Clock()
+    script = [(10.0, ": hb"), (2000.0, ": hb"), (2001.0, "event:KEEP-ALIVE"), (2002.0, "")]
+    stream = EventStream(None, dispatch=lambda e: None, logger=Mock(), monotonic=clock.monotonic,
+                         activity_check=lambda: True, zombie_after=1500.0)
+    with pytest.raises(HomeConnectError) as exc:
+        list(stream._read_events(_ScriptedLines(clock, script)))   # pylint: disable=protected-access
+    assert getattr(exc.value, "zombie_renewal", False)
 
 
 def test_zombie_renewal_stop_carries_no_error():
@@ -1044,6 +1097,7 @@ def test_appliance_without_messages_reports_none_not_zero():
 def _st(**kw):
     base = {"connected": True, "connected_for": 600.0, "last_connect_age": 600.0,
             "keepalives": 0, "last_keepalive_age": None, "wire_events": 0,
+            "raw_lines": 0, "last_raw_line_age": None, "comment_heartbeats": 0,
             "last_wire_event_age": None, "last_wire_event_type": None,
             "appliances": [], "requests_today": 7, "daily_budget": 1000}
     base.update(kw)
@@ -1070,9 +1124,13 @@ def test_verdict_a_never_connected():
 
 
 def test_verdict_b_connected_ten_minutes_keepalives_zero_events_is_not_healthy():
-    out = format_stream_status(_st(connected_for=600.0, keepalives=14, last_keepalive_age=32.0))
+    out = format_stream_status(_st(connected_for=600.0, keepalives=14, last_keepalive_age=32.0,
+                                   raw_lines=30, last_raw_line_age=32.0, comment_heartbeats=2))
     assert "NO events received in 10m" in out[-1]
-    assert "trigger a change" in out[-1] and "KEEP-ALIVE frames seen: yes" in out[-1]
+    assert "trigger a change" in out[-1]
+    assert ("(server data last received 32s ago; KEEP-ALIVE frames: 14, "
+            "comment heartbeats: 2)") in out[-1]
+    assert "  raw stream lines: 30 (last 32s ago), comment heartbeats: 2" in out
     assert "the cloud is sending nothing" not in out[-1]
     assert "arriving" not in " ".join(out)
     assert "  keep-alives: 14 (last 32s ago)" in out
@@ -1081,7 +1139,38 @@ def test_verdict_b_connected_ten_minutes_keepalives_zero_events_is_not_healthy()
 
 def test_verdict_b_without_keepalives_words_neutrally():
     verdict = _verdict(_st(connected_for=900.0))
-    assert "NO events received in 15m" in verdict and "KEEP-ALIVE frames seen: no" in verdict
+    assert "NO events received in 15m" in verdict
+    assert "no data at all from the server on this connection" in verdict
+    assert "KEEP-ALIVE frames" not in verdict
+
+
+def test_verdict_b_raw_data_only_from_a_previous_connection_reads_as_no_data():
+    verdict = _verdict(_st(connected_for=600.0, raw_lines=9, last_raw_line_age=4000.0))
+    assert "no data at all from the server on this connection" in verdict
+
+
+def test_verdict_b_heartbeats_only_shows_data_but_not_events():
+    verdict = _verdict(_st(connected_for=600.0, raw_lines=5, last_raw_line_age=40.0,
+                           comment_heartbeats=5))
+    assert "NO events received in 10m" in verdict
+    assert "server data last received 40s ago; KEEP-ALIVE frames: 0, comment heartbeats: 5" in verdict
+
+
+def test_verdict_b_unavailable_raw_counters_are_reported_not_read_as_zero():
+    status = _st(connected_for=600.0)
+    for key in ("raw_lines", "last_raw_line_age", "comment_heartbeats"):
+        del status[key]
+    out = format_stream_status(status)
+    assert "raw line counters unavailable" in out[-1]
+    assert "no data at all" not in out[-1]
+    assert "  raw stream lines: unavailable" in out
+
+
+def test_format_raw_stream_lines_zero_and_nonzero():
+    assert "  raw stream lines: 0 since plugin start, comment heartbeats: 0" in \
+        format_stream_status(_st())
+    out = format_stream_status(_st(raw_lines=1234, last_raw_line_age=7.0, comment_heartbeats=0))
+    assert "  raw stream lines: 1234 (last 7s ago), comment heartbeats: 0" in out
 
 
 def test_verdict_b_events_only_from_a_previous_connection_do_not_count():
@@ -1182,7 +1271,8 @@ def test_reconnect_with_only_keepalives_reads_silent_after_five_minutes():
     status["appliances"] = [_app(age=1e6)]   # its STATUS predates this connection
     verdict = _verdict(status)
     assert "NO events received in 6m" in verdict
-    assert "KEEP-ALIVE frames seen: yes" in verdict and "arriving" not in verdict
+    assert "server data last received 0s ago; KEEP-ALIVE frames: 3, comment heartbeats: 0" in verdict
+    assert "arriving" not in verdict
 
 
 def test_format_lists_appliances_and_request_budget():

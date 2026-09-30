@@ -264,6 +264,9 @@ class EventStream:
         self._last_connected_at = None
         self._keepalive_count = 0
         self._last_keepalive_at = None
+        self._raw_line_count = 0
+        self._last_raw_line_at = None
+        self._comment_heartbeat_count = 0
         self._wire_event_count = 0
         self._last_wire_event_at = None
         self._last_wire_event_type = None
@@ -283,6 +286,9 @@ class EventStream:
                 "last_connect_age": age(self._last_connected_at),
                 "keepalives": self._keepalive_count,
                 "last_keepalive_age": age(self._last_keepalive_at),
+                "raw_lines": self._raw_line_count,
+                "last_raw_line_age": age(self._last_raw_line_at),
+                "comment_heartbeats": self._comment_heartbeat_count,
                 "wire_events": self._wire_event_count,
                 "last_wire_event_age": age(self._last_wire_event_at),
                 "last_wire_event_type": self._last_wire_event_type,
@@ -298,6 +304,18 @@ class EventStream:
         with self._stats_lock:
             self._keepalive_count += 1
             self._last_keepalive_at = when
+
+    def _record_raw_line(self, line, when):
+        with self._stats_lock:
+            self._raw_line_count += 1
+            self._last_raw_line_at = when
+            if line.startswith(":"):
+                self._comment_heartbeat_count += 1
+
+    def _observe_lines(self, lines):
+        for line in lines:
+            self._record_raw_line(line, self._monotonic())
+            yield line
 
     def _record_wire_event(self, event_type, when):
         with self._stats_lock:
@@ -386,7 +404,7 @@ class EventStream:
 
     def _read_events(self, stream):
         last_real = self._monotonic()
-        for fields in parse_sse_lines(stream.lines()):
+        for fields in parse_sse_lines(self._observe_lines(stream.lines())):
             event = build_event(fields)
             if not event.event or event.event == KEEP_ALIVE:
                 now = self._monotonic()     # one clock read shared by the keep-alive stamp and the zombie check
@@ -896,12 +914,18 @@ def _stream_verdict(status):
                 f"({status.get('wire_events', 0)} wire events)")
     if since < SILENT_VERDICT_SECONDS:
         return f"connected {_fmt_age(since)} ago, no events yet (too early to call it silent)"
-    last_alive = status.get("last_keepalive_age")
-    alive = "yes" if last_alive is not None and last_alive <= since else "no"
-    # ":" comment heartbeats are dropped by the SSE parser, so they are not counted here.
+    last_raw = status.get("last_raw_line_age")
+    if status.get("raw_lines") is None:
+        data = "raw line counters unavailable"
+    elif last_raw is None or last_raw > since:
+        data = "no data at all from the server on this connection"
+    else:
+        data = (f"server data last received {_fmt_age(last_raw)} ago; "
+                f"KEEP-ALIVE frames: {status.get('keepalives', 0)}, "
+                f"comment heartbeats: {status.get('comment_heartbeats', 0)}")
     return (f"connected but NO events received in {_fmt_age(since)} — an idle appliance is normal, "
             "and the cloud has been seen to lag up to ~10 min; trigger a change "
-            f"(open the door, run a program) and re-run this menu (KEEP-ALIVE frames seen: {alive})")
+            f"(open the door, run a program) and re-run this menu ({data})")
 
 
 def format_stream_status(status):
@@ -921,6 +945,15 @@ def format_stream_status(status):
         lines.append(f"  keep-alives: {keepalives} (last {_fmt_age(status['last_keepalive_age'])} ago)")
     else:
         lines.append("  keep-alives: 0")
+
+    raw = status.get("raw_lines")
+    if raw is None:
+        lines.append("  raw stream lines: unavailable")
+    elif raw:
+        lines.append(f"  raw stream lines: {raw} (last {_fmt_age(status['last_raw_line_age'])} ago), "
+                     f"comment heartbeats: {status.get('comment_heartbeats', 0)}")
+    else:
+        lines.append("  raw stream lines: 0 since plugin start, comment heartbeats: 0")
 
     wire = status.get("wire_events", 0)
     if wire:

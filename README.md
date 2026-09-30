@@ -331,7 +331,10 @@ Run **Plugins → Home Connect → Log Event Stream Status** and read the last l
 - **connected but NO events received in Nm** — the connection is open but nothing has
   arrived on it. A quiet idle appliance is normal, and cloud lag of up to ~10 minutes has
   been observed. Trigger a real change (open the door, start a program) and run the menu
-  again. *KEEP-ALIVE frames seen* tells you whether the connection itself is alive.
+  again. The bracketed text at the end says when data was last received from the server
+  (with KEEP-ALIVE and comment-heartbeat counts), or *no data at all from the server on
+  this connection* if the link is open but completely silent. The **raw stream lines**
+  line shows the same counts.
 - **connected Nm ago, no events yet** — too early to call it silent; wait and re-run.
 - **only connection events so far** — the appliance reported CONNECTED/DISCONNECTED but no
   status updates yet.

@@ -5,6 +5,22 @@ All notable changes to the Home Connect plugin. Format loosely follows
 convention). Versions `2026.0.x` were the phased internal build-up; **`2026.1.0`** is the
 first release of the complete, user-visible feature set.
 
+## [2026.2.1] — 2026-09-30
+
+### Fixed
+- **Appliance states now update promptly.** The event stream reader waited for a full
+  8 KiB of data before processing anything, so small updates (a status change, a
+  program-finished event) could sit unprocessed for minutes or indefinitely on a quiet
+  connection. Events are now handled as they arrive.
+- **The stalled-stream safety net now actually sees keep-alives.** Because of the same
+  delay, keep-alive frames were never counted, so a stream that had silently stopped
+  producing events mid-program could not be detected and renewed.
+
+### Changed
+- **Log Event Stream Status** now shows raw stream line and comment-heartbeat counts, and
+  the "no events" verdict reports when data was last received from the server (or that
+  none arrived on this connection) instead of a yes/no keep-alive flag.
+
 ## [2026.2.0] — 2026-09-30
 
 ### Added
