@@ -27,7 +27,7 @@ class FakeHTTPResponse:
 class FakeStreamHTTPResponse:
     """Mimics a streaming ``http.client.HTTPResponse`` for ``open_stream``.
 
-    ``read(n)`` pops the next queued chunk; a queued ``Exception`` is raised (to
+    ``read1(n)`` pops the next queued chunk; a queued ``Exception`` is raised (to
     simulate a socket read timeout), and an exhausted queue returns ``b""`` (the
     server closing the stream).
     """
@@ -40,7 +40,17 @@ class FakeStreamHTTPResponse:
     def getheaders(self):
         return list(self._headers.items())
 
-    def read(self, amt=None):  # noqa: ARG002 - amt ignored, chunks are pre-sized
+    def read(self, amt=None):  # noqa: ARG002 - drains the error body of a failed open
+        return b"".join(self._drain())
+
+    def _drain(self):
+        while self._chunks:
+            item = self._chunks.popleft()
+            if isinstance(item, Exception):
+                raise item
+            yield item if isinstance(item, bytes) else item.encode("utf-8")
+
+    def read1(self, amt=None):  # noqa: ARG002 - amt ignored, chunks are pre-sized
         if not self._chunks:
             return b""
         item = self._chunks.popleft()
