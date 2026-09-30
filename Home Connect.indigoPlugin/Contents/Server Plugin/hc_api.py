@@ -146,7 +146,7 @@ class StreamResponse:
         buf = ""
         try:
             while True:
-                chunk = self._resp.read(_STREAM_CHUNK)
+                chunk = self._resp.read1(_STREAM_CHUNK)   # read() would block until a full chunk accumulates
                 if not chunk:
                     break                      # server closed the stream
                 buf += chunk.decode("utf-8", "replace")

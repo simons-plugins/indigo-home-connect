@@ -1,5 +1,9 @@
 """Unit tests for hc_api.py streaming seam (open_stream + StreamResponse)."""
+import http.client
+import http.server
 import socket
+import threading
+import time
 from datetime import datetime, timezone
 from unittest.mock import Mock
 
@@ -158,3 +162,54 @@ def test_request_count_property_reports_today_and_zero_after_day_rollover():
     assert api.request_count == 1
     api._wall_now = lambda: datetime(2026, 8, 3, tzinfo=timezone.utc)  # pylint: disable=protected-access
     assert api.request_count == 0            # stale yesterday count must not read as today's
+
+
+# -- StreamResponse delivers small frames promptly on a live chunked stream -----
+
+class _OneKeepAliveThenStall(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    stall = threading.Event()
+
+    def do_GET(self):  # noqa: N802 - http.server API
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        frame = b"event:KEEP-ALIVE\ndata:\n\n"
+        self.wfile.write(b"%x\r\n%s\r\n" % (len(frame), frame))
+        self.wfile.flush()
+        self.stall.wait(8)
+
+    def log_message(self, *args):  # noqa: D401
+        pass
+
+
+def test_lines_yields_small_frame_without_waiting_for_a_full_buffer():
+    _OneKeepAliveThenStall.stall.clear()
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _OneKeepAliveThenStall)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=6)
+    try:
+        conn.request("GET", "/events")
+        stream = StreamResponse(conn, conn.getresponse(), "/events", Mock())
+        received = []
+
+        def consume():
+            try:
+                for line in stream.lines():
+                    received.append(line)
+            except HomeConnectError:
+                pass
+
+        reader = threading.Thread(target=consume, daemon=True)
+        reader.start()
+        deadline = time.monotonic() + 2.0
+        while len(received) < 3 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert received == ["event:KEEP-ALIVE", "data:", ""]
+    finally:
+        _OneKeepAliveThenStall.stall.set()
+        stream.close()
+        server.shutdown()
+        server.server_close()
