@@ -9,6 +9,7 @@ The transport is injectable (``connection_factory``) so tests can drive it with 
 fake connection without touching the network. This module never imports
 ``indigo`` — all Indigo-touching code lives in ``plugin.py``.
 """
+import codecs
 import http.client
 import json
 import logging
@@ -144,12 +145,15 @@ class StreamResponse:
 
     def lines(self):
         buf = ""
+        # read1() splits at arbitrary byte boundaries, so a multibyte character
+        # can straddle two reads; an incremental decoder carries the partial bytes.
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
         try:
             while True:
                 chunk = self._resp.read1(_STREAM_CHUNK)   # read() would block until a full chunk accumulates
                 if not chunk:
                     break                      # server closed the stream
-                buf += chunk.decode("utf-8", "replace")
+                buf += decoder.decode(chunk)
                 parts = buf.split("\n")
                 buf = parts.pop()              # keep any trailing partial line
                 for line in parts:

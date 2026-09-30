@@ -918,11 +918,11 @@ def _stream_verdict(status):
     if status.get("raw_lines") is None:
         data = "raw line counters unavailable"
     elif last_raw is None or last_raw > since:
-        data = "no data at all from the server on this connection"
+        data = "no complete lines received from the server on this connection"
     else:
-        data = (f"server data last received {_fmt_age(last_raw)} ago; "
-                f"KEEP-ALIVE frames: {status.get('keepalives', 0)}, "
-                f"comment heartbeats: {status.get('comment_heartbeats', 0)}")
+        data = (f"last complete line received {_fmt_age(last_raw)} ago; "
+                f"KEEP-ALIVE frames since plugin start: {status.get('keepalives', 0)}, "
+                f"comment heartbeats since plugin start: {status.get('comment_heartbeats', 0)}")
     return (f"connected but NO events received in {_fmt_age(since)} — an idle appliance is normal, "
             "and the cloud has been seen to lag up to ~10 min; trigger a change "
             f"(open the door, run a program) and re-run this menu ({data})")
@@ -950,7 +950,8 @@ def format_stream_status(status):
     if raw is None:
         lines.append("  raw stream lines: unavailable")
     elif raw:
-        lines.append(f"  raw stream lines: {raw} (last {_fmt_age(status['last_raw_line_age'])} ago), "
+        lines.append(f"  raw stream lines: {raw} since plugin start "
+                     f"(last {_fmt_age(status['last_raw_line_age'])} ago), "
                      f"comment heartbeats: {status.get('comment_heartbeats', 0)}")
     else:
         lines.append("  raw stream lines: 0 since plugin start, comment heartbeats: 0")

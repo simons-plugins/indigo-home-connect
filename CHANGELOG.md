@@ -12,14 +12,17 @@ first release of the complete, user-visible feature set.
   8 KiB of data before processing anything, so small updates (a status change, a
   program-finished event) could sit unprocessed for minutes or indefinitely on a quiet
   connection. Events are now handled as they arrive.
+- Non-ASCII characters (e.g. "ü") in stream data are no longer corrupted when they happen to
+  be split across two network reads.
 - **The stalled-stream safety net now actually sees keep-alives.** Because of the same
   delay, keep-alive frames were never counted, so a stream that had silently stopped
   producing events mid-program could not be detected and renewed.
 
 ### Changed
-- **Log Event Stream Status** now shows raw stream line and comment-heartbeat counts, and
-  the "no events" verdict reports when data was last received from the server (or that
-  none arrived on this connection) instead of a yes/no keep-alive flag.
+- **Log Event Stream Status** now shows raw stream line and comment-heartbeat counts (totals
+  since plugin start), and the "no events" verdict reports when the last complete line was
+  received from the server (or that no complete lines arrived on this connection) instead
+  of a yes/no keep-alive flag.
 
 ## [2026.2.0] — 2026-09-30
 

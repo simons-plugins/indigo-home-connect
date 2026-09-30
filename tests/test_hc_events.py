@@ -1128,9 +1128,9 @@ def test_verdict_b_connected_ten_minutes_keepalives_zero_events_is_not_healthy()
                                    raw_lines=30, last_raw_line_age=32.0, comment_heartbeats=2))
     assert "NO events received in 10m" in out[-1]
     assert "trigger a change" in out[-1]
-    assert ("(server data last received 32s ago; KEEP-ALIVE frames: 14, "
-            "comment heartbeats: 2)") in out[-1]
-    assert "  raw stream lines: 30 (last 32s ago), comment heartbeats: 2" in out
+    assert ("(last complete line received 32s ago; KEEP-ALIVE frames since plugin start: 14, "
+            "comment heartbeats since plugin start: 2)") in out[-1]
+    assert "  raw stream lines: 30 since plugin start (last 32s ago), comment heartbeats: 2" in out
     assert "the cloud is sending nothing" not in out[-1]
     assert "arriving" not in " ".join(out)
     assert "  keep-alives: 14 (last 32s ago)" in out
@@ -1140,20 +1140,21 @@ def test_verdict_b_connected_ten_minutes_keepalives_zero_events_is_not_healthy()
 def test_verdict_b_without_keepalives_words_neutrally():
     verdict = _verdict(_st(connected_for=900.0))
     assert "NO events received in 15m" in verdict
-    assert "no data at all from the server on this connection" in verdict
+    assert "no complete lines received from the server on this connection" in verdict
     assert "KEEP-ALIVE frames" not in verdict
 
 
 def test_verdict_b_raw_data_only_from_a_previous_connection_reads_as_no_data():
     verdict = _verdict(_st(connected_for=600.0, raw_lines=9, last_raw_line_age=4000.0))
-    assert "no data at all from the server on this connection" in verdict
+    assert "no complete lines received from the server on this connection" in verdict
 
 
 def test_verdict_b_heartbeats_only_shows_data_but_not_events():
     verdict = _verdict(_st(connected_for=600.0, raw_lines=5, last_raw_line_age=40.0,
                            comment_heartbeats=5))
     assert "NO events received in 10m" in verdict
-    assert "server data last received 40s ago; KEEP-ALIVE frames: 0, comment heartbeats: 5" in verdict
+    assert ("last complete line received 40s ago; KEEP-ALIVE frames since plugin start: 0, "
+            "comment heartbeats since plugin start: 5") in verdict
 
 
 def test_verdict_b_unavailable_raw_counters_are_reported_not_read_as_zero():
@@ -1162,7 +1163,7 @@ def test_verdict_b_unavailable_raw_counters_are_reported_not_read_as_zero():
         del status[key]
     out = format_stream_status(status)
     assert "raw line counters unavailable" in out[-1]
-    assert "no data at all" not in out[-1]
+    assert "no complete lines" not in out[-1]
     assert "  raw stream lines: unavailable" in out
 
 
@@ -1170,7 +1171,7 @@ def test_format_raw_stream_lines_zero_and_nonzero():
     assert "  raw stream lines: 0 since plugin start, comment heartbeats: 0" in \
         format_stream_status(_st())
     out = format_stream_status(_st(raw_lines=1234, last_raw_line_age=7.0, comment_heartbeats=0))
-    assert "  raw stream lines: 1234 (last 7s ago), comment heartbeats: 0" in out
+    assert "  raw stream lines: 1234 since plugin start (last 7s ago), comment heartbeats: 0" in out
 
 
 def test_verdict_b_events_only_from_a_previous_connection_do_not_count():
@@ -1271,8 +1272,34 @@ def test_reconnect_with_only_keepalives_reads_silent_after_five_minutes():
     status["appliances"] = [_app(age=1e6)]   # its STATUS predates this connection
     verdict = _verdict(status)
     assert "NO events received in 6m" in verdict
-    assert "server data last received 0s ago; KEEP-ALIVE frames: 3, comment heartbeats: 0" in verdict
+    assert ("last complete line received 0s ago; KEEP-ALIVE frames since plugin start: 3, "
+            "comment heartbeats since plugin start: 0") in verdict
     assert "arriving" not in verdict
+
+
+def test_silent_reconnect_does_not_borrow_the_previous_connections_lines():
+    clock = Clock()
+    stream = EventStream(None, dispatch=lambda e: None, logger=Mock(), monotonic=clock.monotonic)
+    # Connection 1 delivers a keep-alive frame and a comment heartbeat, then ends.
+    stream._set_connected(0.0)               # pylint: disable=protected-access
+    first = [(10.0, "event:KEEP-ALIVE"), (11.0, ""), (20.0, ": hb")]
+    assert list(stream._read_events(_ScriptedLines(clock, first))) == []   # pylint: disable=protected-access
+    stream._set_connected(None)              # pylint: disable=protected-access
+    # Connection 2 opens and stays silent past the silent-verdict threshold.
+    clock.t = 1000.0
+    stream._set_connected(clock.t)           # pylint: disable=protected-access
+    assert list(stream._read_events(_ScriptedLines(clock, []))) == []      # pylint: disable=protected-access
+    clock.t = 1000.0 + hc_events.SILENT_VERDICT_SECONDS + 60.0
+    status = stream.stats()
+    assert status["raw_lines"] == 3                             # cumulative across connections
+    assert status["keepalives"] == 1
+    assert status["last_raw_line_age"] > status["connected_for"]
+    status.update(appliances=[], requests_today=7, daily_budget=1000)
+    out = format_stream_status(status)
+    assert "no complete lines received from the server on this connection" in out[-1]
+    assert "last complete line received" not in out[-1]
+    assert "KEEP-ALIVE" not in out[-1]      # connection 1's count is not presented as connection 2's
+    assert "  raw stream lines: 3 since plugin start (last 22m ago), comment heartbeats: 1" in out
 
 
 def test_format_lists_appliances_and_request_budget():

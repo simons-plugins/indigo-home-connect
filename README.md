@@ -331,10 +331,12 @@ Run **Plugins → Home Connect → Log Event Stream Status** and read the last l
 - **connected but NO events received in Nm** — the connection is open but nothing has
   arrived on it. A quiet idle appliance is normal, and cloud lag of up to ~10 minutes has
   been observed. Trigger a real change (open the door, start a program) and run the menu
-  again. The bracketed text at the end says when data was last received from the server
-  (with KEEP-ALIVE and comment-heartbeat counts), or *no data at all from the server on
-  this connection* if the link is open but completely silent. The **raw stream lines**
-  line shows the same counts.
+  again. The bracketed text at the end says when the last complete line was received from
+  the server (with KEEP-ALIVE and comment-heartbeat counts, which are totals *since plugin
+  start*), or *no complete lines received from the server on this connection* if the link
+  is open but completely silent. The **raw stream lines** line shows the same totals. `:`
+  comment heartbeats show the link is open, but they do not reset or arm the stalled-stream
+  watchdog; only KEEP-ALIVE frames do.
 - **connected Nm ago, no events yet** — too early to call it silent; wait and re-run.
 - **only connection events so far** — the appliance reported CONNECTED/DISCONNECTED but no
   status updates yet.

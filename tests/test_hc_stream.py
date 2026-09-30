@@ -190,6 +190,7 @@ def test_lines_yields_small_frame_without_waiting_for_a_full_buffer():
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=6)
+    stream = None
     try:
         conn.request("GET", "/events")
         stream = StreamResponse(conn, conn.getresponse(), "/events", Mock())
@@ -210,6 +211,58 @@ def test_lines_yields_small_frame_without_waiting_for_a_full_buffer():
         assert received == ["event:KEEP-ALIVE", "data:", ""]
     finally:
         _OneKeepAliveThenStall.stall.set()
-        stream.close()
+        if stream is not None:
+            stream.close()
+        conn.close()
         server.shutdown()
         server.server_close()
+
+
+class _ChunkedScript(http.server.BaseHTTPRequestHandler):
+    """Sends ``script`` (a list of (bytes, pause_seconds_after)) as separate HTTP chunks."""
+    protocol_version = "HTTP/1.1"
+    script = []
+
+    def do_GET(self):  # noqa: N802 - http.server API
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for payload, pause in self.script:
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(payload), payload))
+            self.wfile.flush()
+            time.sleep(pause)
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+
+    def log_message(self, *args):  # noqa: D401
+        pass
+
+
+def _read_all_lines_from_real_socket(script):
+    _ChunkedScript.script = script
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ChunkedScript)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=6)
+    stream = None
+    try:
+        conn.request("GET", "/events")
+        stream = StreamResponse(conn, conn.getresponse(), "/events", Mock())
+        return list(stream.lines())
+    finally:
+        if stream is not None:
+            stream.close()
+        conn.close()
+        server.shutdown()
+        server.server_close()
+
+
+def test_lines_reassembles_a_line_split_across_http_chunks():
+    lines = _read_all_lines_from_real_socket([(b"event:KEEP-A", 0.2), (b"LIVE\n\n", 0.0)])
+    assert lines == ["event:KEEP-ALIVE", ""]
+
+
+def test_lines_decodes_a_multibyte_character_split_across_http_chunks():
+    lines = _read_all_lines_from_real_socket([(b"data:\xc3", 0.2), (b"\xbc\n", 0.0)])
+    assert lines == ["data:\u00fc"]          # "ü", not two replacement characters
