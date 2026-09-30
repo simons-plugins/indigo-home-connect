@@ -5,6 +5,23 @@ All notable changes to the Home Connect plugin. Format loosely follows
 convention). Versions `2026.0.x` were the phased internal build-up; **`2026.1.0`** is the
 first release of the complete, user-visible feature set.
 
+## [2026.2.0] — 2026-09-30
+
+### Added
+- **Plugins → Home Connect → Log Event Stream Status.** Reports whether the event
+  stream is connected and for how long, keep-alive and wire-event counts (with ages),
+  each appliance's last message, today's request count, and a plain-language verdict
+  (not connected / connected but silent / too early to tell / receiving events).
+- **Per-event debug logging.** Each STATUS/NOTIFY/EVENT/CONNECTED/DISCONNECTED routed
+  to a known appliance logs its type and item names (never values) at debug level.
+- **First-event info line.** After each stream (re)connect the first routed event logs
+  `Home Connect first event after connect: <TYPE> for <appliance>`.
+
+Why: a stream that was connected but delivering nothing was previously
+indistinguishable in the log from one whose events changed nothing (#26), and
+`connected=true` in *Log Discovered Appliances* only reflects the cloud's reachability
+flag. No device-state or behaviour changes.
+
 ## [2026.1.4] — 2026-08-03
 
 Red-team hardening, wave 2 — the remaining audit findings (#15–#21, plus the

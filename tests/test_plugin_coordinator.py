@@ -200,3 +200,44 @@ def test_changed_credentials_rebuild_marks_devices(monkeypatch):
     monkeypatch.setattr(p, "_build_client", lambda cid, sec, sim: (Mock(), _NewAuth()))
     p._rebuild_client()                           # pylint: disable=protected-access
     bridge.mark_auth_required.assert_called_once()
+
+
+# -- Log Event Stream Status menu (#26) -----------------------------------------
+
+class _StatusCoordinator:
+    def stream_status(self):
+        return {"connected": True, "connected_for": 600.0, "last_connect_age": 600.0,
+                "keepalives": 14, "last_keepalive_age": 32.0, "wire_events": 0,
+                "last_wire_event_age": None, "last_wire_event_type": None, "appliances": []}
+
+
+def test_log_event_stream_status_without_coordinator_logs_info_and_does_not_crash():
+    from unittest.mock import Mock
+    p = _plugin()
+    p.logger = Mock()
+    p.logEventStreamStatus()
+    p.logger.info.assert_called_once()
+    assert "no event stream running" in p.logger.info.call_args[0][0]
+
+
+def test_log_event_stream_status_logs_one_line_each_including_verdict_and_budget():
+    from unittest.mock import Mock
+    p = _plugin()
+    p.logger = Mock()
+    p._coordinator = _StatusCoordinator()     # pylint: disable=protected-access
+    p._api = Mock(request_count=7)            # pylint: disable=protected-access
+    p.logEventStreamStatus()
+    lines = [c[0][0] for c in p.logger.info.call_args_list]
+    assert lines[0] == "Home Connect event stream status:"
+    assert "  requests today: 7/1000" in lines
+    assert "NO events received" in lines[-1]
+    assert all("\n" not in line for line in lines)
+
+
+def test_menu_items_xml_callbacks_exist_on_plugin():
+    import xml.etree.ElementTree as ET
+    from pathlib import Path
+    xml = Path(plugin.__file__).parent / "MenuItems.xml"
+    callbacks = [e.text for e in ET.parse(xml).getroot().iter("CallbackMethod")]
+    assert "logEventStreamStatus" in callbacks and "logDiscoveredAppliances" in callbacks
+    assert all(callable(getattr(plugin.Plugin, name, None)) for name in callbacks)

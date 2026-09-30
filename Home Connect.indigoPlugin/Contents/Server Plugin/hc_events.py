@@ -92,6 +92,13 @@ DEPAIRED = "DEPAIRED"
 
 _ITEM_EVENTS = frozenset({STATUS, EVENT, NOTIFY})
 
+# Wire events routed to a known appliance that count as "a message from it".
+_APPLIANCE_EVENTS = frozenset({STATUS, EVENT, NOTIFY, CONNECTED, DISCONNECTED})
+
+# Menu verdict: a connection this old with no events is worth calling silent.
+SILENT_VERDICT_SECONDS = 5 * 60.0
+_LOG_KEYS_MAX = 5
+
 # A valid SSE field line: "name: value" (single optional space). Anything else
 # that is not blank, not a comment and not a bare known field name (see
 # _BARE_FIELD_NAMES below) is structural garbage -> restart.
@@ -249,6 +256,53 @@ class EventStream:
         self._zombie_after = zombie_after
         self._current = None
         self._current_lock = threading.Lock()
+        # Liveness counters (per-process, never reset on reconnect) so the log can
+        # tell "cloud sent nothing" from "events arrived and changed nothing".
+        self._stats_lock = threading.Lock()
+        self._connected_since = None
+        self._last_connected_at = None
+        self._keepalive_count = 0
+        self._last_keepalive_at = None
+        self._wire_event_count = 0
+        self._last_wire_event_at = None
+        self._last_wire_event_type = None
+
+    def stats(self):
+        """Plain-dict liveness snapshot; ages are seconds on the injected clock
+        (``None`` when it never happened)."""
+        now = self._monotonic()
+
+        def age(then):
+            return None if then is None else max(0.0, now - then)
+
+        with self._stats_lock:
+            return {
+                "connected": self._connected_since is not None,
+                "connected_for": age(self._connected_since),
+                "last_connect_age": age(self._last_connected_at),
+                "keepalives": self._keepalive_count,
+                "last_keepalive_age": age(self._last_keepalive_at),
+                "wire_events": self._wire_event_count,
+                "last_wire_event_age": age(self._last_wire_event_at),
+                "last_wire_event_type": self._last_wire_event_type,
+            }
+
+    def _set_connected(self, when):
+        with self._stats_lock:
+            self._connected_since = when
+            if when is not None:
+                self._last_connected_at = when
+
+    def _record_keepalive(self, when):
+        with self._stats_lock:
+            self._keepalive_count += 1
+            self._last_keepalive_at = when
+
+    def _record_wire_event(self, event_type, when):
+        with self._stats_lock:
+            self._wire_event_count += 1
+            self._last_wire_event_at = when
+            self._last_wire_event_type = event_type
 
     def run(self, stop_event):
         backoff = 0.0
@@ -279,6 +333,7 @@ class EventStream:
                     raise HomeConnectError("stream opened during shutdown", aborted=True)
                 self._logger.info("Home Connect event stream connected")
                 opened_at = self._monotonic()
+                self._set_connected(opened_at)
                 self._dispatch(SseEvent(START))
                 backoff = 0.0
                 for event in self._read_events(stream):
@@ -307,6 +362,7 @@ class EventStream:
                 self._logger.exception(exc)
             finally:
                 self._close_current()
+                self._set_connected(None)
             self._dispatch(SseEvent(STOP, error=error))
             if stop_event.is_set():
                 break
@@ -332,13 +388,15 @@ class EventStream:
         for fields in parse_sse_lines(stream.lines()):
             event = build_event(fields)
             if not event.event or event.event == KEEP_ALIVE:
+                now = self._monotonic()     # single read: tests tick the clock per call
+                self._record_keepalive(now)
                 # Heartbeat: the read reset the socket timeout, but keep-alives
                 # alone are also the zombie-stream signature (#21) — a running
                 # appliance emits progress every few minutes, so a long
                 # keep-alive-only stretch mid-program means the backend has
                 # stopped generating events. Renew (one counted request).
                 if (self._activity_check is not None and self._activity_check()
-                        and (self._monotonic() - last_real) >= self._zombie_after):
+                        and (now - last_real) >= self._zombie_after):
                     self._logger.info(
                         "Home Connect event stream has sent only keep-alives for %.0f min "
                         "while a program is running — renewing the stream",
@@ -348,6 +406,7 @@ class EventStream:
                     raise renewal
                 continue
             last_real = self._monotonic()
+            self._record_wire_event(event.event, last_real)
             yield event
 
     def close(self):
@@ -545,6 +604,11 @@ class HomeConnectCoordinator:
         self._stop = threading.Event()
         self._worker_thread = None
         self._stream_thread = None
+        # haId -> (monotonic time, event type) of the last wire event routed to
+        # that appliance (guarded by self._lock).
+        self._last_message = {}
+        # Set on START, cleared by the first routed wire event (worker thread only).
+        self._first_event_pending = False
 
     # -- Lifecycle -----------------------------------------------------------
     def start(self):
@@ -702,6 +766,7 @@ class HomeConnectCoordinator:
 
         etype = event.event
         if etype == START:
+            self._first_event_pending = True
             for appliance in self.appliances():
                 appliance.on_stream_start()
             return
@@ -732,6 +797,9 @@ class HomeConnectCoordinator:
             self._scheduler.post(self._discover, 0)
             return
 
+        if etype in _APPLIANCE_EVENTS:
+            self._note_wire_event(appliance, event)
+
         if etype in (STATUS, NOTIFY):
             appliance.merge_items(event.items())
         elif etype == EVENT:
@@ -746,3 +814,108 @@ class HomeConnectCoordinator:
     def _get(self, haid):
         with self._lock:
             return self._appliances.get(haid)
+
+    def _note_wire_event(self, appliance, event):
+        with self._lock:
+            self._last_message[appliance.haid] = (self._monotonic(), event.event)
+        # Item key tails only — never values (may be personal usage data).
+        keys = [str(item.get("key", "?")).rsplit(".", 1)[-1]
+                for item in event.items() if isinstance(item, dict)]
+        shown = ", ".join(keys[:_LOG_KEYS_MAX]) + (", …" if len(keys) > _LOG_KEYS_MAX else "")
+        self._logger.debug("Home Connect event %s for %s (%d item(s): %s)",
+                           event.event, appliance.name, len(keys), shown or "none")
+        if self._first_event_pending:
+            self._first_event_pending = False
+            self._logger.info("Home Connect first event after connect: %s for %s",
+                              event.event, appliance.name)
+
+    def stream_status(self):
+        """Liveness snapshot: the stream's counters plus each known appliance's
+        last routed message (ages in seconds; ``None`` = none since plugin start)."""
+        status = self._stream.stats()
+        now = self._monotonic()
+        entries = []
+        for appliance in self.appliances():
+            with self._lock:
+                last = self._last_message.get(appliance.haid)
+            entries.append({
+                "name": appliance.name,
+                "type": appliance.type,
+                "haid": redact(appliance.haid),
+                "connected": appliance.connected,
+                "last_message_age": None if last is None else max(0.0, now - last[0]),
+                "last_message_type": None if last is None else last[1],
+            })
+        status["appliances"] = entries
+        return status
+
+
+# ---------------------------------------------------------------------------
+# Menu output: pure formatting so the verdict logic is testable without Indigo
+# ---------------------------------------------------------------------------
+def _fmt_age(seconds):
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h{seconds % 3600 // 60:02d}m"
+
+
+def _stream_verdict(status):
+    if not status.get("connected"):
+        return ("stream is NOT connected — no events can arrive until it reconnects "
+                "(check the log for 'event stream ended' or authorization messages)")
+    since = status.get("connected_for") or 0.0
+    # Counters are per-process, so judge only what arrived on THIS connection.
+    last_event = status.get("last_wire_event_age")
+    last_alive = status.get("last_keepalive_age")
+    if last_event is not None and last_event <= since:
+        return f"receiving events normally (last {status.get('last_wire_event_type')} {_fmt_age(last_event)} ago)"
+    if since < SILENT_VERDICT_SECONDS:
+        return f"connected {_fmt_age(since)} ago, no events yet (too early to call it silent)"
+    alive = "yes" if last_alive is not None and last_alive <= since else "no"
+    return (f"connected but NO events received in {_fmt_age(since)} — the cloud is sending nothing "
+            f"(keep-alives: {alive}); Home Connect can lag ~10 min, so trigger a change "
+            "(open the door, run a program) and re-run this menu")
+
+
+def format_stream_status(status):
+    """Turn a :meth:`HomeConnectCoordinator.stream_status` dict (optionally with
+    ``requests_today``/``daily_budget``) into log lines ending in a verdict."""
+    lines = ["Home Connect event stream status:"]
+    if status.get("connected"):
+        lines.append(f"  stream: connected for {_fmt_age(status.get('connected_for') or 0)}")
+    elif status.get("last_connect_age") is not None:
+        lines.append(f"  stream: NOT connected (last connected {_fmt_age(status['last_connect_age'])} ago)")
+    else:
+        lines.append("  stream: NOT connected (never connected since plugin start)")
+
+    keepalives = status.get("keepalives", 0)
+    if keepalives:
+        lines.append(f"  keep-alives: {keepalives} (last {_fmt_age(status['last_keepalive_age'])} ago)")
+    else:
+        lines.append("  keep-alives: 0")
+
+    wire = status.get("wire_events", 0)
+    if wire:
+        lines.append(f"  wire events: {wire} (last {status.get('last_wire_event_type')} "
+                     f"{_fmt_age(status['last_wire_event_age'])} ago)")
+    else:
+        lines.append("  wire events: 0 since plugin start")
+
+    appliances = status.get("appliances") or []
+    if not appliances:
+        lines.append("  appliances: none discovered yet")
+    for entry in appliances:
+        if entry.get("last_message_age") is None:
+            last = "none since plugin start"
+        else:
+            last = f"{entry.get('last_message_type')} {_fmt_age(entry['last_message_age'])} ago"
+        lines.append(f"  {entry.get('name')} [{entry.get('type') or '?'}] haId={entry.get('haid')}: "
+                     f"connected={entry.get('connected')}, last message: {last}")
+
+    if status.get("requests_today") is not None:
+        lines.append(f"  requests today: {status['requests_today']}/{status.get('daily_budget')}")
+    lines.append(f"  verdict: {_stream_verdict(status)}")
+    return lines

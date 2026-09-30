@@ -237,6 +237,11 @@ class HomeConnectAPI:
     def host(self):
         return self._host
 
+    @property
+    def request_count(self):
+        """Requests counted against today's budget (0 once the UTC day rolled over)."""
+        return self._request_count if self._wall_now().date() == self._counter_date else 0
+
     def abort(self):
         """Permanently unblock this client's gate/backoff waits (plugin shutdown
         or a prefs rebuild superseding this client). Waiting threads raise a

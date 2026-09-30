@@ -323,6 +323,23 @@ Confirm the appliances are paired in the Home Connect **phone app**, that author
 succeeded (Event Log), and that your developer account email exactly matches your SingleKey
 ID email in **lowercase**. A just-created application may still be [propagating](#1-register-a-home-connect-application).
 
+**Device states never update.**
+Run **Plugins → Home Connect → Log Event Stream Status** and read the last line
+(*verdict*):
+- **stream is NOT connected** — no events can arrive; look in the Event Log for
+  *event stream ended* or *authorization required* messages.
+- **connected but NO events received in Nm** — the connection is open but the Home Connect
+  cloud has sent nothing. Trigger a real change (open the door, start a program) and run the
+  menu again; Home Connect cloud events can lag ~10 minutes and arrive in a burst.
+- **connected Nm ago, no events yet** — too early to call it silent; wait and re-run.
+- **receiving events normally** — events are arriving; if a state still looks wrong, enable
+  debug logging to see which items each event carried.
+
+Two things that commonly mislead: the **Last Event** state only fills for discrete
+alerts/events (program finished, salt low, …) — **not** for door, power or cycle changes,
+which arrive as status updates; and `connected=True` in **Log Discovered Appliances** is
+the cloud's reachability flag for the appliance, not proof that events are flowing.
+
 ### Offline vs off
 
 Some appliances report **power-off as a disconnect**, making "off" and "offline"
