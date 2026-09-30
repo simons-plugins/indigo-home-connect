@@ -477,14 +477,22 @@ class Plugin(indigo.PluginBase):
     def logEventStreamStatus(self):
         with self._coord_lock:
             coordinator = self._coordinator
-            api = self._api
+            api = self._coordinator_api
         if coordinator is None:
             self.logger.info("Home Connect: no event stream running (authorize the plugin first).")
             return
-        status = coordinator.stream_status()
+        try:
+            status = coordinator.stream_status()
+        except Exception as exc:  # pylint: disable=broad-except
+            self.logger.exception(exc)
+            self.logger.error("Home Connect event stream status could not be read; "
+                              "see the traceback above.")
+            return
         if api is not None:
             status["requests_today"] = api.request_count
             status["daily_budget"] = DAILY_BUDGET
+        else:
+            status["requests_today"] = "unavailable"
         for line in format_stream_status(status):
             self.logger.info(line)
 

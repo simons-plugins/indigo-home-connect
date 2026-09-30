@@ -225,13 +225,50 @@ def test_log_event_stream_status_logs_one_line_each_including_verdict_and_budget
     p = _plugin()
     p.logger = Mock()
     p._coordinator = _StatusCoordinator()     # pylint: disable=protected-access
-    p._api = Mock(request_count=7)            # pylint: disable=protected-access
+    p._coordinator_api = Mock(request_count=7)   # pylint: disable=protected-access
     p.logEventStreamStatus()
     lines = [c[0][0] for c in p.logger.info.call_args_list]
     assert lines[0] == "Home Connect event stream status:"
     assert "  requests today: 7/1000" in lines
     assert "NO events received" in lines[-1]
     assert all("\n" not in line for line in lines)
+
+
+def test_log_event_stream_status_without_api_says_requests_unavailable_not_omitted():
+    from unittest.mock import Mock
+    p = _plugin()
+    p.logger = Mock()
+    p._coordinator = _StatusCoordinator()     # pylint: disable=protected-access
+    p._coordinator_api = None                 # pylint: disable=protected-access
+    p.logEventStreamStatus()
+    lines = [c[0][0] for c in p.logger.info.call_args_list]
+    assert "  requests today: unavailable" in lines
+
+
+def test_log_event_stream_status_prefers_the_coordinators_api_over_the_current_one():
+    from unittest.mock import Mock
+    p = _plugin()
+    p.logger = Mock()
+    p._coordinator = _StatusCoordinator()     # pylint: disable=protected-access
+    p._coordinator_api = Mock(request_count=7)   # pylint: disable=protected-access
+    p._api = Mock(request_count=999)          # pylint: disable=protected-access
+    p.logEventStreamStatus()
+    assert "  requests today: 7/1000" in [c[0][0] for c in p.logger.info.call_args_list]
+
+
+def test_log_event_stream_status_survives_stream_status_raising():
+    from unittest.mock import Mock
+
+    class _Broken:
+        def stream_status(self):
+            raise RuntimeError("boom")
+
+    p = _plugin()
+    p.logger = Mock()
+    p._coordinator = _Broken()                # pylint: disable=protected-access
+    p.logEventStreamStatus()                  # must not raise
+    p.logger.exception.assert_called_once()
+    assert "could not be read" in p.logger.error.call_args[0][0]
 
 
 def test_menu_items_xml_callbacks_exist_on_plugin():

@@ -11,10 +11,17 @@ first release of the complete, user-visible feature set.
 - **Plugins → Home Connect → Log Event Stream Status.** Reports whether the event
   stream is connected and for how long, keep-alive and wire-event counts (with ages),
   each appliance's last message, today's request count, and a plain-language verdict
-  (not connected / connected but silent / too early to tell / receiving events).
+  (not connected / only connection events / events not routed to a known appliance /
+  status updates arriving / too early to tell / silent). "Status updates arriving"
+  needs a STATUS, NOTIFY or EVENT for a known appliance on the current connection;
+  connection notices alone never earn it. Comment-line (`:`) heartbeats are not
+  counted as keep-alives.
 - **Per-event debug logging.** Each STATUS/NOTIFY/EVENT/CONNECTED/DISCONNECTED routed
-  to a known appliance logs its type and item names (never values) at debug level.
-- **First-event info line.** After each stream (re)connect the first routed event logs
+  to a known appliance logs the event type and the item key names (last segment only,
+  at most 5; never values) at debug level. Diagnostics failures are logged and never
+  drop the event itself.
+- **First-event info line.** After each stream (re)connect the first routed
+  STATUS/NOTIFY/EVENT (not CONNECTED/DISCONNECTED) logs
   `Home Connect first event after connect: <TYPE> for <appliance>`.
 
 Why: a stream that was connected but delivering nothing was previously
